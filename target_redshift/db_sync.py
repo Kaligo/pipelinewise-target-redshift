@@ -364,7 +364,7 @@ class DbSync:
         if without_schema:
             return f'"{rs_table_name.upper()}"'
 
-        return f'{self.schema_name}."{rs_table_name.upper()}"'
+        return f'"{self.schema_name}"."{rs_table_name.upper()}"'
 
     def record_primary_key_string(self, record):
         if len(self.stream_schema_message['key_properties']) == 0:
@@ -478,46 +478,8 @@ class DbSync:
                 self.logger.debug("Running query: {}".format(copy_sql))
                 cur.execute(copy_sql)
 
-                # Step 5/a: Insert or Update if primary key defined
-                #           Do UPDATE first and second INSERT to calculate
-                #           the number of affected rows correctly
-                if len(stream_schema_message['key_properties']) > 0:
-                    # Step 5/a/1: Update existing records
-                    if not self.skip_updates:
-                        update_sql = """UPDATE {}
-                            SET {}
-                            FROM {} s
-                            WHERE {}
-                        """.format(
-                            target_table,
-                            ', '.join(['{} = s.{}'.format(c['name'], c['name']) for c in columns_with_trans]),
-                            stage_table,
-                            self.primary_key_merge_condition()
-                        )
-                        self.logger.debug("Running query: {}".format(update_sql))
-                        cur.execute(update_sql)
-                        updates = cur.rowcount
-
-                    # Step 5/a/2: Insert new records
-                    insert_sql = """INSERT INTO {} ({})
-                        SELECT {}
-                        FROM {} s LEFT JOIN {}
-                        ON {}
-                        WHERE {}
-                    """.format(
-                        target_table,
-                        ', '.join([c['name'] for c in columns_with_trans]),
-                        ', '.join(['s.{}'.format(c['name']) for c in columns_with_trans]),
-                        stage_table,
-                        target_table,
-                        self.primary_key_merge_condition(),
-                        ' AND '.join(['{}.{} IS NULL'.format(target_table, c) for c in primary_column_names(stream_schema_message)])
-                    )
-                    self.logger.debug("Running query: {}".format(insert_sql))
-                    cur.execute(insert_sql)
-                    inserts = cur.rowcount
-
-                elif self.full_refresh:
+                # step 5/a: full refresh - No downtime insertion
+                if self.full_refresh:
                     self.logger.info("Performing full refresh")
                     archived_target_table = self.table_name(stream, is_stage=False, is_archived=True)
                     table_swap_sql = """BEGIN;
@@ -527,28 +489,68 @@ class DbSync:
                         COMMIT;
                     """.format(
                         target_table,
-                        archived_target_table,
+                        archived_target_table.split('.')[1],
                         stage_table,
-                        target_table,
+                        target_table.split('.')[1],
                         self.drop_table_query(is_stage=False, is_archived=True)
                     )
                     self.logger.info("Running full-refresh query: {}".format(table_swap_sql))
                     cur.execute(table_swap_sql)
 
-                # Step 5/b: Insert only if no primary key
                 else:
-                    insert_sql = """INSERT INTO {} ({})
-                        SELECT {}
-                        FROM {} s
-                    """.format(
-                        target_table,
-                        ', '.join([c['name'] for c in columns_with_trans]),
-                        ', '.join(['s.{}'.format(c['name']) for c in columns_with_trans]),
-                        stage_table
-                    )
-                    self.logger.debug("Running query: {}".format(insert_sql))
-                    cur.execute(insert_sql)
-                    inserts = cur.rowcount
+                    # Step 5/b: Insert or Update if primary key defined
+                    #           Do UPDATE first and second INSERT to calculate
+                    #           the number of affected rows correctly
+                    if len(stream_schema_message['key_properties']) > 0:
+                        # Step 5/b/1: Update existing records
+                        if not self.skip_updates:
+                            update_sql = """UPDATE {}
+                                SET {}
+                                FROM {} s
+                                WHERE {}
+                            """.format(
+                                target_table,
+                                ', '.join(['{} = s.{}'.format(c['name'], c['name']) for c in columns_with_trans]),
+                                stage_table,
+                                self.primary_key_merge_condition()
+                            )
+                            self.logger.debug("Running query: {}".format(update_sql))
+                            cur.execute(update_sql)
+                            updates = cur.rowcount
+
+                        # Step 5/b/2: Insert new records
+                        insert_sql = """INSERT INTO {} ({})
+                            SELECT {}
+                            FROM {} s LEFT JOIN {}
+                            ON {}
+                            WHERE {}
+                        """.format(
+                            target_table,
+                            ', '.join([c['name'] for c in columns_with_trans]),
+                            ', '.join(['s.{}'.format(c['name']) for c in columns_with_trans]),
+                            stage_table,
+                            target_table,
+                            self.primary_key_merge_condition(),
+                            ' AND '.join(['{}.{} IS NULL'.format(target_table, c) for c in primary_column_names(stream_schema_message)])
+                        )
+                        self.logger.debug("Running query: {}".format(insert_sql))
+                        cur.execute(insert_sql)
+                        inserts = cur.rowcount
+
+                    # Step 5/c: Insert only if no primary key
+                    else:
+                        insert_sql = """INSERT INTO {} ({})
+                            SELECT {}
+                            FROM {} s
+                        """.format(
+                            target_table,
+                            ', '.join([c['name'] for c in columns_with_trans]),
+                            ', '.join(['s.{}'.format(c['name']) for c in columns_with_trans]),
+                            stage_table
+                        )
+                        self.logger.debug("Running query: {}".format(insert_sql))
+                        cur.execute(insert_sql)
+                        inserts = cur.rowcount
 
                 # Step 6: Drop stage table
                 cur.execute(self.drop_table_query(is_stage=True))
