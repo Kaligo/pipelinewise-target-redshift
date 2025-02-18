@@ -261,6 +261,7 @@ class DbSync:
 
         self.s3 = aws_session.client('s3')
         self.skip_updates = self.connection_config.get('skip_updates', False)
+        self.full_refresh = self.connection_config.get('full_refresh', False)
 
         self.schema_name = None
         self.grantees = None
@@ -349,13 +350,16 @@ class DbSync:
 
                 return []
 
-    def table_name(self, stream_name, is_stage=False, without_schema=False):
+    def table_name(self, stream_name, is_stage=False, is_archived=False, without_schema=False):
         stream_dict = stream_name_to_dict(stream_name)
         table_name = stream_dict['table_name']
         rs_table_name = table_name.replace('.', '_').replace('-', '_').lower()
 
         if is_stage:
             rs_table_name = 'stg_{}'.format(rs_table_name)
+
+        if is_archived:
+            rs_table_name = 'archived_{}'.format(rs_table_name)
 
         if without_schema:
             return f'"{rs_table_name.upper()}"'
@@ -513,6 +517,23 @@ class DbSync:
                     cur.execute(insert_sql)
                     inserts = cur.rowcount
 
+                elif self.full_refresh:
+                    archived_target_table = self.table_name(stream, is_stage=False, is_archived=True)
+                    table_swap_sql = """BEGIN;
+                        ALTER TABLE {} RENAME TO {};
+                        ALTER TABLE {} RENAME TO {};
+                        {};
+                        COMMIT;
+                    """.format(
+                        target_table,
+                        archived_target_table,
+                        stage_table,
+                        target_table,
+                        self.drop_table_query(is_stage=False, is_archived=True)
+                    )
+                    self.logger.debug("Running query: {}".format(table_swap_sql))
+                    cur.execute(table_swap_sql)
+                    
                 # Step 5/b: Insert only if no primary key
                 else:
                     insert_sql = """INSERT INTO {} ({})
@@ -562,9 +583,9 @@ class DbSync:
             ', '.join(columns + primary_key)
         )
 
-    def drop_table_query(self, is_stage=False):
+    def drop_table_query(self, is_stage=False, is_archived=False):
         stream_schema_message = self.stream_schema_message
-        return 'DROP TABLE IF EXISTS {}'.format(self.table_name(stream_schema_message['stream'], is_stage))
+        return 'DROP TABLE IF EXISTS {}'.format(self.table_name(stream_schema_message['stream'], is_stage, is_archived))
 
     def grant_usage_on_schema(self, schema_name, grantee, to_group=False):
         query = "GRANT USAGE ON SCHEMA {} TO {} {}".format(schema_name, 'GROUP' if to_group else '', grantee)
