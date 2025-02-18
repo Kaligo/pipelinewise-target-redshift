@@ -518,6 +518,7 @@ class DbSync:
                     inserts = cur.rowcount
 
                 elif self.full_refresh:
+                    self.logger.info("Performing full refresh")
                     archived_target_table = self.table_name(stream, is_stage=False, is_archived=True)
                     table_swap_sql = """BEGIN;
                         ALTER TABLE {} RENAME TO {};
@@ -531,9 +532,9 @@ class DbSync:
                         target_table,
                         self.drop_table_query(is_stage=False, is_archived=True)
                     )
-                    self.logger.debug("Running query: {}".format(table_swap_sql))
+                    self.logger.info("Running full-refresh query: {}".format(table_swap_sql))
                     cur.execute(table_swap_sql)
-                    
+
                 # Step 5/b: Insert only if no primary key
                 else:
                     insert_sql = """INSERT INTO {} ({})
