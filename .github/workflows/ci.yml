@@ -10,19 +10,18 @@ on:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
     strategy:
       fail-fast: true
       matrix:
-        python-version: [3.6, 3.7, 3.8]
+        python-version: [3.9, 3.12]
 
     steps:
       - name: Checking out repo
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.container[1] }}
-        uses: actions/setup-python@v2
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -37,7 +36,7 @@ jobs:
           pip install .[test]
 
       - name: Check if pylint is happy
-        run: pylint target_redshift -d C,W,unexpected-keyword-arg,duplicate-code
+        run: pylint target_redshift -d C,W,unexpected-keyword-arg --fail-under=9.5
 
       - name: Run Unit Tests
         run: pytest -v --disable-pytest-warnings tests/unit

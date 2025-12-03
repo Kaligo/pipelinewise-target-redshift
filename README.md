@@ -99,9 +99,72 @@ Full list of options in `config.json`:
 | primary_key_required                | Boolean |            | (Default: True) Log based and Incremental replications on tables with no Primary Key cause duplicates when merging UPDATE events. When set to true, stop loading data if no Primary Key is defined. |
 | validate_records                    | Boolean |            | (Default: False) Validate every single record message to the corresponding JSON schema. This option is disabled by default and invalid RECORD messages will fail only at load time by Snowflake. Enabling this option will detect invalid records earlier but could cause performance degradation. |
 | skip_updates                        | Boolean |    No      | (Default: False) Do not update existing records when Primary Key is defined. Useful to improve performance when records are immutable, e.g. events
+| append_only                         | Boolean |    No      | (Default: False) In fast sync mode, append all records from the stage table to the target table without performing updates or deletions. This is useful for immutable data like events where you only want to append new records. When enabled, all records from the stage table are inserted into the target table regardless of whether they already exist.
+| detect_deletions                    | Boolean |    No      | (Default: False) Enable deletion detection in fast sync mode. When enabled, records that exist in the target table but not in the stage table will be marked as deleted by setting the `_SDC_DELETED_AT` timestamp. Requires `add_metadata_columns` to be enabled, tables to have primary keys defined, and `FULL_TABLE` replication method. This option only works with `FULL_TABLE` replication method and does not work with incremental updates or full refresh mode. |
+| cleanup_s3_files                    | Boolean |    No      | (Default: True) **Fast sync mode only.** Automatically clean up S3 files after they have been successfully loaded into Redshift. When set to False, S3 files will be retained after loading. This is useful for debugging or when you need to keep the exported files for other purposes. This setting only applies to fast sync operations and has no effect in regular sync mode. |
 | compression                         | String  |    No        | The compression method to use when writing files to S3 and running Redshift `COPY`. The currently supported methods are `gzip` or `bzip2`. Defaults to none (`""`). |
 | slices                              | Integer |    No      | The number of slices to split files into prior to running COPY on Redshift. This should be set to the number of Redshift slices. The number of slices per node depends on the node size of the cluster - run `SELECT COUNT(DISTINCT slice) slices FROM stv_slices` to calculate this. Defaults to `1`. |
 | temp_dir                            | String  |            | (Default: platform-dependent) Directory of temporary CSV files with RECORD messages. |
+
+### Fast Sync Support
+
+This target supports **Fast Sync** mode when used with `tap-postgres` configured for fast sync. Fast sync enables high-performance data loading directly from S3 (exported by RDS PostgreSQL) to Redshift, bypassing the traditional Singer record-by-record processing.
+
+#### How Fast Sync Works
+
+1. **Source Side (tap-postgres)**: When fast sync is enabled, `tap-postgres` exports data directly from RDS PostgreSQL to S3 using `aws_s3.query_export_to_s3` and sends `FAST_SYNC_RDS_S3_INFO` messages.
+
+2. **Target Side (target-redshift)**: This target automatically detects `FAST_SYNC_RDS_S3_INFO` messages and:
+   - Creates a temporary staging table
+   - Loads data from S3 using Redshift's `COPY` command
+   - Merges data into the target table (INSERT/UPDATE)
+   - Detects deleted rows and sets `_SDC_DELETED_AT` timestamp
+   - Cleans up temporary tables and S3 files
+
+#### Fast Sync Requirements
+
+- **Redshift IAM Role**: The Redshift cluster must have an IAM role with:
+  - `s3:GetObject` permission on the S3 bucket containing exported data
+  - `s3:ListBucket` permission on the S3 bucket
+  - `s3:DeleteObject` permission (for cleanup after load)
+
+- **S3 Bucket Access**: The S3 bucket containing exported data must be accessible from the Redshift cluster.
+
+- **Primary Keys**: For deletion detection to work, tables must have primary keys defined.
+
+- **Metadata Columns**: Enable `add_metadata_columns` in the target config to support deletion detection via `_SDC_DELETED_AT`.
+
+- **Deletion Detection**: Enable `detect_deletions` in the target config to automatically detect and mark deleted records during fast sync operations. This option is disabled by default.
+
+#### Fast Sync Benefits
+
+- **Performance**: Direct COPY from S3 is much faster than record-by-record inserts
+- **Scalability**: Handles large tables efficiently
+- **Deletion Detection**: Automatically detects and marks deleted rows by comparing full table dumps
+- **Reduced Network Traffic**: Data flows directly from S3 to Redshift without intermediate processing
+
+#### Example Configuration
+
+No additional configuration is required in `target-redshift` for fast sync. The target automatically handles `FAST_SYNC_RDS_S3_INFO` messages when they are received from the tap.
+
+However, ensure your Redshift cluster has the proper IAM role configured:
+
+```json
+{
+  "host": "xxxxxx.redshift.amazonaws.com",
+  "port": 5439,
+  "user": "my_user",
+  "password": "password",
+  "dbname": "database_name",
+  "aws_redshift_copy_role_arn": "arn:aws:iam::account-id:role/redshift-role",
+  "s3_bucket": "target-bucket-name",
+  "default_target_schema": "my_target_schema",
+  "add_metadata_columns": true,
+  "detect_deletions": false
+}
+```
+
+For more information about setting up fast sync on the tap side, see the [tap-postgres Fast Sync documentation](../pipelinewise-tap-postgres/FAST_SYNC_SETUP.md).
 
 ### To run tests:
 

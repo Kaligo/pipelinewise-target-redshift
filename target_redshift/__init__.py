@@ -18,6 +18,7 @@ from singer import get_logger
 from itertools import islice
 
 from target_redshift.db_sync import DbSync
+from target_redshift.fast_sync.handler import FastSyncHandler
 
 LOGGER = get_logger('target_redshift')
 
@@ -84,6 +85,18 @@ def emit_state(state):
         sys.stdout.flush()
 
 
+def flush_fast_sync_queue(fast_sync_queue, stream_to_sync, config):
+    """Flush queued fast sync operations with parallelism from config and clear the queue"""
+    if not fast_sync_queue:
+        return
+    parallelism = config.get("parallelism", DEFAULT_PARALLELISM)
+    max_parallelism = config.get("max_parallelism", DEFAULT_MAX_PARALLELISM)
+    FastSyncHandler.flush_operations(
+        fast_sync_queue, stream_to_sync, parallelism, max_parallelism
+    )
+    fast_sync_queue.clear()
+
+
 def get_schema_names_from_config(config):
     default_target_schema = config.get('default_target_schema')
     schema_mapping = config.get('schema_mapping', {})
@@ -122,6 +135,7 @@ def persist_lines(config, lines, table_cache=None) -> None:
     row_count = {}
     stream_to_sync = {}
     total_row_count = {}
+    fast_sync_queue = {}  # Queue for FAST_SYNC_RDS_S3_INFO messages to process in parallel
     batch_size_rows = config.get('batch_size_rows', DEFAULT_BATCH_SIZE_ROWS)
 
     # Loop over lines from stdin
@@ -247,7 +261,14 @@ def persist_lines(config, lines, table_cache=None) -> None:
         elif t == 'ACTIVATE_VERSION':
             LOGGER.debug('ACTIVATE_VERSION message')
 
+        elif t == 'FAST_SYNC_RDS_S3_INFO':
+            stream, message = FastSyncHandler.validate_message(o, schemas, stream_to_sync, line)
+            fast_sync_queue[stream] = message
+
         elif t == 'STATE':
+            # Process any queued fast sync operations before updating state
+            flush_fast_sync_queue(fast_sync_queue, stream_to_sync, config)
+
             LOGGER.debug('Setting state to {}'.format(o['value']))
             state = o['value']
 
@@ -259,6 +280,9 @@ def persist_lines(config, lines, table_cache=None) -> None:
             raise Exception("Unknown message type {} in message {}"
                             .format(o['type'], o))
 
+    # Process any remaining fast sync operations
+    flush_fast_sync_queue(fast_sync_queue, stream_to_sync, config)
+
     # if some bucket has records that need to be flushed but haven't reached batch size
     # then flush all buckets.
     if sum(row_count.values()) > 0:
@@ -268,7 +292,7 @@ def persist_lines(config, lines, table_cache=None) -> None:
     # emit latest state
     emit_state(copy.deepcopy(flushed_state))
 
-# pylint: disable=too-many-arguments
+# pylint: disable=too-many-arguments,too-many-positional-arguments
 def flush_streams(
         streams,
         row_count,
@@ -344,8 +368,8 @@ def flush_streams(
     return flushed_state
 
 
-def load_stream_batch(stream, records_to_load, row_count, db_sync, delete_rows=False, compression=None, slices=None, temp_dir=None):
-    # Load into redshift                                            
+def load_stream_batch(stream, records_to_load, row_count, db_sync, delete_rows=False, compression=None, slices=None, temp_dir=None):  # pylint: disable=too-many-positional-arguments
+    # Load into redshift
     try:
         if row_count[stream] > 0:
             flush_records(stream, records_to_load, row_count[stream], db_sync, compression, slices, temp_dir)
@@ -371,7 +395,7 @@ def ceiling_division(n, d):
     return -(n // -d)
 
 
-def flush_records(stream, records_to_load, row_count, db_sync, compression=None, slices=None, temp_dir=None):
+def flush_records(stream, records_to_load, row_count, db_sync, compression=None, slices=None, temp_dir=None):  # pylint: disable=too-many-positional-arguments
     slices = slices or 1
     use_gzip = compression == "gzip"
     use_bzip2 = compression == "bzip2"
