@@ -5,6 +5,7 @@ This module handles loading data from S3 into Redshift using the fast sync strat
 It extracts data loading logic from DbSync to provide a cleaner separation of concerns.
 """
 import json
+import re
 from typing import Dict, List, Tuple, Any
 import psycopg2.extras
 
@@ -65,12 +66,30 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
             {aws_session_token}
         """.strip()
 
-    def _build_copy_options(self) -> str:
-        return self.connection_config.get('copy_options', """
+    def _build_copy_options(self, s3_region: str) -> str:
+        """
+        Build COPY options string, ensuring REGION is included if not already present.
+
+        Args:
+            s3_region: AWS region where S3 bucket is located
+
+        Returns:
+            COPY options string with REGION included if not already present
+        """
+        copy_options = self.connection_config.get('copy_options', """
             EMPTYASNULL BLANKSASNULL TRIMBLANKS TRUNCATECOLUMNS
             TIMEFORMAT 'auto'
             COMPUPDATE OFF STATUPDATE OFF
         """).strip()
+
+        # Check if REGION is already in copy_options
+        if re.search(r'\bREGION\s+\'[^\']+\'', copy_options, re.IGNORECASE):
+            # REGION already present, return as-is
+            return copy_options
+
+        # REGION not present, add it
+        escaped_region = self._escape_sql_string(s3_region)
+        return f"{copy_options} REGION '{escaped_region}'"
 
     @staticmethod
     def _build_s3_copy_path(s3_bucket: str, s3_path: str, files_uploaded: int) -> str:
@@ -86,18 +105,15 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
         columns_with_trans: List[Dict[str, str]],
         s3_copy_path: str,
         copy_credentials: str,
-        copy_options: str,
-        s3_region: str
+        copy_options: str
     ) -> str:
         column_names = ', '.join(c['name'] for c in columns_with_trans)
-        escaped_region = self._escape_sql_string(s3_region)
         return f"""COPY {stage_table} ({column_names})
             FROM '{s3_copy_path}'
             {copy_credentials}
             {copy_options}
             CSV
             IGNOREHEADER 1
-            REGION '{escaped_region}'
         """.strip()
 
     def _perform_full_refresh(
@@ -377,11 +393,11 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
 
                 # Build and execute COPY command
                 copy_credentials = self._build_copy_credentials()
-                copy_options = self._build_copy_options()
+                copy_options = self._build_copy_options(s3_region)
                 s3_copy_path = self._build_s3_copy_path(s3_bucket, s3_path, files_uploaded)
                 copy_sql = self._build_copy_sql(
                     stage_table, columns_with_trans, s3_copy_path,
-                    copy_credentials, copy_options, s3_region
+                    copy_credentials, copy_options
                 )
                 self.logger.debug("Running COPY query: %s", copy_sql)
                 cur.execute(copy_sql)

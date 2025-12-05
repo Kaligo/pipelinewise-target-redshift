@@ -500,6 +500,88 @@ class TestFastSyncLoader:
 
     @patch('target_redshift.db_sync.boto3')
     @patch('target_redshift.db_sync.psycopg2.connect')
+    def test_fast_sync_copy_options_adds_region_when_missing(self, mock_connect, mock_boto3):
+        """Test that load_from_s3 adds REGION to COPY command when not in copy_options"""
+        # Mock database connection
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.rowcount = 0
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_conn.__enter__.return_value = mock_conn
+        mock_connect.return_value = mock_conn
+
+        # Create config with copy_options that doesn't include REGION
+        config_no_region = self.config.copy()
+        config_no_region['copy_options'] = 'EMPTYASNULL BLANKSASNULL TRIMBLANKS'
+        config_no_region['cleanup_s3_files'] = False  # Disable S3 cleanup to avoid needing S3 mocks
+
+        # Create DbSync instance and FastSyncLoader
+        db = db_sync.DbSync(config_no_region, self.stream_schema_message)
+        loader = FastSyncLoader(db)
+
+        # Call load_from_s3 with a specific region
+        loader.load_from_s3(
+            s3_bucket='source-bucket',
+            s3_path='test/path/data.csv',
+            s3_region='ap-southeast-1',
+            rows_uploaded=10,
+            files_uploaded=1
+        )
+
+        # Verify COPY command was executed
+        copy_calls = [str(call[0][0]) if call[0] else '' for call in mock_cursor.execute.call_args_list
+                     if 'COPY' in str(call)]
+        assert len(copy_calls) > 0, "COPY command should be executed"
+
+        # Verify REGION was added to the COPY command
+        copy_sql = ' '.join(copy_calls)
+        assert "REGION 'ap-southeast-1'" in copy_sql, "Should add REGION when not present in copy_options"
+        assert copy_sql.count('REGION') == 1, "Should have exactly one REGION clause"
+        assert 'EMPTYASNULL' in copy_sql, "Should preserve existing copy_options"
+
+    @patch('target_redshift.db_sync.boto3')
+    @patch('target_redshift.db_sync.psycopg2.connect')
+    def test_fast_sync_copy_options_preserves_existing_region(self, mock_connect, mock_boto3):
+        """Test that load_from_s3 doesn't duplicate REGION when already in copy_options"""
+        # Mock database connection
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.rowcount = 0
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_conn.__enter__.return_value = mock_conn
+        mock_connect.return_value = mock_conn
+
+        # Create config with REGION already in copy_options
+        config_with_region = self.config.copy()
+        config_with_region['copy_options'] = "REGION 'ap-southeast-1' NULL AS 'null' EMPTYASNULL BLANKSASNULL TRIMBLANKS"
+        config_with_region['cleanup_s3_files'] = False  # Disable S3 cleanup to avoid needing S3 mocks
+
+        # Create DbSync instance and FastSyncLoader
+        db = db_sync.DbSync(config_with_region, self.stream_schema_message)
+        loader = FastSyncLoader(db)
+
+        # Call load_from_s3 with a different region (should be ignored)
+        loader.load_from_s3(
+            s3_bucket='source-bucket',
+            s3_path='test/path/data.csv',
+            s3_region='us-east-1',  # Different region, but should be ignored
+            rows_uploaded=10,
+            files_uploaded=1
+        )
+
+        # Verify COPY command was executed
+        copy_calls = [str(call[0][0]) if call[0] else '' for call in mock_cursor.execute.call_args_list
+                     if 'COPY' in str(call)]
+        assert len(copy_calls) > 0, "COPY command should be executed"
+
+        # Verify existing REGION is preserved and not duplicated
+        copy_sql = ' '.join(copy_calls)
+        assert "REGION 'ap-southeast-1'" in copy_sql, "Should preserve existing REGION from copy_options"
+        assert copy_sql.count('REGION') == 1, "Should not add duplicate REGION"
+        assert "REGION 'us-east-1'" not in copy_sql, "Should not add new REGION when one already exists"
+
+    @patch('target_redshift.db_sync.boto3')
+    @patch('target_redshift.db_sync.psycopg2.connect')
     def test_fast_sync_deletion_detection_with_primary_key(self, mock_connect, mock_boto3):
         """Test that deletion detection is NOT executed for incremental updates (tables with primary key)"""
         # Mock S3 client
