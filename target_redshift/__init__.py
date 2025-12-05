@@ -262,7 +262,7 @@ def persist_lines(config, lines, table_cache=None) -> None:
             LOGGER.debug('ACTIVATE_VERSION message')
 
         elif t == 'FAST_SYNC_RDS_S3_INFO':
-            stream, message = FastSyncHandler.validate_message(o, schemas, stream_to_sync, line)
+            stream, message = FastSyncHandler.validate_and_extract_message(o, schemas, stream_to_sync, line)
             fast_sync_queue[stream] = message
 
         elif t == 'STATE':

@@ -4,7 +4,7 @@ Unit tests for FastSyncHandler in target-redshift
 import pytest
 from unittest.mock import MagicMock, patch
 
-import target_redshift.db_sync as db_sync
+from target_redshift import db_sync
 from target_redshift.fast_sync.handler import FastSyncHandler
 
 
@@ -40,57 +40,139 @@ class TestFastSyncHandler:
             'test_schema-test_table': {}
         }
 
-    def test_validate_message_success(self):
-        """Test successful message validation"""
-        stream_to_sync = {}
-        db = db_sync.DbSync(self.config, self.stream_schema_message)
-        stream_to_sync['test_schema-test_table'] = db
-
+    def _create_valid_message(self, **overrides):
+        """Helper to create a valid FAST_SYNC_RDS_S3_INFO message"""
         message = {
             'stream': 'test_schema-test_table',
             's3_bucket': 'test-bucket',
-            's3_path': 'test/path/data.csv'
+            's3_path': 'test/path/data.csv',
+            's3_region': 'us-east-1',
+            'files_uploaded': 1,
+            'replication_method': 'FULL_TABLE'
         }
+        message.update(overrides)
+        return message
 
-        stream, msg = FastSyncHandler.validate_message(
+    def _create_stream_to_sync(self):
+        """Helper to create a stream_to_sync dictionary"""
+        stream_to_sync = {}
+        db = db_sync.DbSync(self.config, self.stream_schema_message)
+        stream_to_sync['test_schema-test_table'] = db
+        return stream_to_sync
+
+    def test_validate_and_extract_message_success(self):
+        """Test successful message validation and extraction"""
+        stream_to_sync = self._create_stream_to_sync()
+        message = self._create_valid_message(rows_uploaded=100)
+
+        stream, msg = FastSyncHandler.validate_and_extract_message(
             message, self.schemas, stream_to_sync, 'test line'
         )
 
         assert stream == 'test_schema-test_table'
         assert msg == message
 
-    def test_validate_message_missing_stream(self):
+    def test_validate_and_extract_message_success_without_rows_uploaded(self):
+        """Test successful message validation when rows_uploaded is omitted (optional field)"""
+        stream_to_sync = self._create_stream_to_sync()
+        message = self._create_valid_message()
+
+        stream, msg = FastSyncHandler.validate_and_extract_message(
+            message, self.schemas, stream_to_sync, 'test line'
+        )
+
+        assert stream == 'test_schema-test_table'
+        assert msg == message
+
+    def test_validate_and_extract_message_missing_stream(self):
         """Test validation fails when stream is missing"""
-        message = {'s3_bucket': 'test-bucket', 's3_path': 'test/path/data.csv'}
+        message = self._create_valid_message()
+        del message['stream']
 
-        with pytest.raises(Exception, match="missing required key 'stream'"):
-            FastSyncHandler.validate_message(
+        with pytest.raises(ValueError, match="missing required fields: stream"):
+            FastSyncHandler.validate_and_extract_message(
                 message, self.schemas, {}, 'test line'
             )
 
-    def test_validate_message_missing_schema(self):
+    def test_validate_and_extract_message_missing_schema(self):
         """Test validation fails when schema is missing"""
-        message = {
-            'stream': 'unknown_stream',
-            's3_bucket': 'test-bucket',
-            's3_path': 'test/path/data.csv'
-        }
+        message = self._create_valid_message(stream='unknown_stream')
 
-        with pytest.raises(Exception, match="before a corresponding schema"):
-            FastSyncHandler.validate_message(
+        with pytest.raises(ValueError, match="before a corresponding schema"):
+            FastSyncHandler.validate_and_extract_message(
                 message, self.schemas, {}, 'test line'
             )
 
-    def test_validate_message_missing_stream_to_sync(self):
+    def test_validate_and_extract_message_missing_stream_to_sync(self):
         """Test validation fails when stream_to_sync is missing"""
+        message = self._create_valid_message()
+
+        with pytest.raises(ValueError, match="before stream was initialized"):
+            FastSyncHandler.validate_and_extract_message(
+                message, self.schemas, {}, 'test line'
+            )
+
+    def test_validate_and_extract_message_missing_s3_bucket(self):
+        """Test validation fails when s3_bucket is missing"""
+        message = self._create_valid_message()
+        del message['s3_bucket']
+
+        with pytest.raises(ValueError, match="missing required fields: s3_bucket"):
+            FastSyncHandler.validate_and_extract_message(
+                message, self.schemas, {}, 'test line'
+            )
+
+    def test_validate_and_extract_message_missing_s3_path(self):
+        """Test validation fails when s3_path is missing"""
+        message = self._create_valid_message()
+        del message['s3_path']
+
+        with pytest.raises(ValueError, match="missing required fields: s3_path"):
+            FastSyncHandler.validate_and_extract_message(
+                message, self.schemas, {}, 'test line'
+            )
+
+    def test_validate_and_extract_message_missing_s3_region(self):
+        """Test validation fails when s3_region is missing"""
+        message = self._create_valid_message()
+        del message['s3_region']
+
+        with pytest.raises(ValueError, match="missing required fields: s3_region"):
+            FastSyncHandler.validate_and_extract_message(
+                message, self.schemas, {}, 'test line'
+            )
+
+    def test_validate_and_extract_message_missing_files_uploaded(self):
+        """Test validation fails when files_uploaded is missing"""
+        message = self._create_valid_message()
+        del message['files_uploaded']
+
+        with pytest.raises(ValueError, match="missing required fields: files_uploaded"):
+            FastSyncHandler.validate_and_extract_message(
+                message, self.schemas, {}, 'test line'
+            )
+
+    def test_validate_and_extract_message_missing_replication_method(self):
+        """Test validation fails when replication_method is missing"""
+        message = self._create_valid_message()
+        del message['replication_method']
+
+        with pytest.raises(ValueError, match="missing required fields: replication_method"):
+            FastSyncHandler.validate_and_extract_message(
+                message, self.schemas, {}, 'test line'
+            )
+
+    def test_validate_and_extract_message_missing_multiple_fields(self):
+        """Test validation fails when multiple required fields are missing"""
         message = {
             'stream': 'test_schema-test_table',
-            's3_bucket': 'test-bucket',
-            's3_path': 'test/path/data.csv'
+            's3_bucket': 'test-bucket'
+            # Missing: s3_path, s3_region, files_uploaded, replication_method
+            # Note: rows_uploaded is optional
         }
 
-        with pytest.raises(Exception, match="before stream was initialized"):
-            FastSyncHandler.validate_message(
+        with pytest.raises(ValueError, match="missing required fields"):
+            FastSyncHandler.validate_and_extract_message(
                 message, self.schemas, {}, 'test line'
             )
 
@@ -101,14 +183,7 @@ class TestFastSyncHandler:
         mock_loader_class.return_value = mock_loader
 
         db = MagicMock()
-        message = {
-            's3_bucket': 'test-bucket',
-            's3_path': 'test/path/data.csv',
-            's3_region': 'us-east-1',
-            'rows_uploaded': 100,
-            'files_uploaded': 1,
-            'replication_method': 'FULL_TABLE'
-        }
+        message = self._create_valid_message(rows_uploaded=100)
 
         FastSyncHandler.load_batch('test_stream', message, db)
 
@@ -130,51 +205,43 @@ class TestFastSyncHandler:
         mock_loader_class.return_value = mock_loader
 
         db = MagicMock()
-        message = {
-            's3_bucket': 'test-bucket',
-            's3_path': 'test/path/data.csv',
-            'replication_method': 'INCREMENTAL'
-        }
+        message = self._create_valid_message(replication_method='INCREMENTAL')
 
         with pytest.raises(Exception, match="Load failed"):
             FastSyncHandler.load_batch('test_stream', message, db)
 
-        # Verify load_from_s3 was called with replication_method
+        # Verify load_from_s3 was called with rows_uploaded defaulting to 0
         mock_loader.load_from_s3.assert_called_once_with(
             s3_bucket='test-bucket',
             s3_path='test/path/data.csv',
-            s3_region='us-east-1',  # Default value
-            rows_uploaded=0,  # Default value
-            files_uploaded=1,  # Default value
+            s3_region='us-east-1',
+            rows_uploaded=0,  # Default value when not provided
+            files_uploaded=1,
             replication_method='INCREMENTAL'
         )
 
     @patch('target_redshift.fast_sync.handler.FastSyncLoader')
-    def test_load_batch_without_replication_method(self, mock_loader_class):
-        """Test batch loading when replication_method is not in message"""
+    def test_load_batch_without_rows_uploaded(self, mock_loader_class):
+        """Test batch loading when rows_uploaded is not provided (optional field)"""
         mock_loader = MagicMock()
         mock_loader_class.return_value = mock_loader
 
         db = MagicMock()
-        message = {
-            's3_bucket': 'test-bucket',
-            's3_path': 'test/path/data.csv',
-            's3_region': 'us-west-2',
-            'rows_uploaded': 50,
-            'files_uploaded': 2
-            # replication_method is missing
-        }
+        message = self._create_valid_message(
+            s3_region='us-west-2',
+            files_uploaded=2
+        )
 
         FastSyncHandler.load_batch('test_stream', message, db)
 
-        # Verify load_from_s3 was called with replication_method=None (default)
+        # Verify load_from_s3 was called with rows_uploaded defaulting to 0
         mock_loader.load_from_s3.assert_called_once_with(
             s3_bucket='test-bucket',
             s3_path='test/path/data.csv',
             s3_region='us-west-2',
-            rows_uploaded=50,
+            rows_uploaded=0,  # Default value when not provided
             files_uploaded=2,
-            replication_method=None
+            replication_method='FULL_TABLE'
         )
 
     @patch('target_redshift.fast_sync.handler.FastSyncHandler.load_batch')
@@ -182,10 +249,7 @@ class TestFastSyncHandler:
     @patch('target_redshift.fast_sync.handler.Parallel')
     def test_flush_operations_empty_queue(self, mock_parallel, mock_backend, mock_load_batch):
         """Test flush_operations with empty queue"""
-        fast_sync_queue = {}
-        stream_to_sync = {}
-
-        FastSyncHandler.flush_operations(fast_sync_queue, stream_to_sync, 4, 16)
+        FastSyncHandler.flush_operations({}, {}, 4, 16)
 
         mock_load_batch.assert_not_called()
         mock_parallel.assert_not_called()
@@ -195,13 +259,12 @@ class TestFastSyncHandler:
     @patch('target_redshift.fast_sync.handler.Parallel')
     def test_flush_operations_with_parallelism(self, mock_parallel_class, mock_backend, mock_load_batch):
         """Test flush_operations with explicit parallelism"""
-        # Mock Parallel instance
         mock_parallel_instance = MagicMock()
         mock_parallel_class.return_value = mock_parallel_instance
 
         fast_sync_queue = {
-            'stream1': {'s3_bucket': 'bucket1', 's3_path': 'path1'},
-            'stream2': {'s3_bucket': 'bucket2', 's3_path': 'path2'}
+            'stream1': self._create_valid_message(rows_uploaded=100, replication_method='FULL_TABLE'),
+            'stream2': self._create_valid_message(rows_uploaded=200, replication_method='INCREMENTAL')
         }
         stream_to_sync = {
             'stream1': MagicMock(),
@@ -220,9 +283,9 @@ class TestFastSyncHandler:
     def test_flush_operations_auto_parallelism(self, mock_parallel, mock_backend, mock_load_batch):
         """Test flush_operations with auto parallelism (parallelism=0)"""
         fast_sync_queue = {
-            'stream1': {'s3_bucket': 'bucket1', 's3_path': 'path1'},
-            'stream2': {'s3_bucket': 'bucket2', 's3_path': 'path2'},
-            'stream3': {'s3_bucket': 'bucket3', 's3_path': 'path3'}
+            'stream1': self._create_valid_message(rows_uploaded=100),
+            'stream2': self._create_valid_message(rows_uploaded=200, replication_method='INCREMENTAL'),
+            'stream3': self._create_valid_message(rows_uploaded=300)
         }
         stream_to_sync = {
             'stream1': MagicMock(),

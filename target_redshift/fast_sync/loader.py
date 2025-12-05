@@ -31,7 +31,7 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
         self.db_sync = db_sync
         self.logger = db_sync.logger
         self.connection_config = db_sync.connection_config
-        self.s3 = db_sync.s3
+        self.s3_client = db_sync.s3
         self.skip_updates = db_sync.skip_updates
         self.full_refresh = db_sync.full_refresh
         self.detect_deletions = self.connection_config.get('detect_deletions', False)
@@ -304,7 +304,8 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
                 columns_with_trans, stream_schema_message
             )
 
-        if self.detect_deletions and replication_method == 'FULL_TABLE' and has_key_properties and not self.full_refresh:
+        if (self.detect_deletions and replication_method == 'FULL_TABLE' and
+                has_key_properties and not self.full_refresh):
             # Delete detection works only if there is full data and table has primary key(s).
             deletions = self._detect_deletions(
                 cur, target_table, stage_table,
@@ -315,7 +316,7 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
 
     def _cleanup_s3_files(self, s3_bucket: str, s3_path: str, files_uploaded: int) -> None:
         try:
-            self.s3.delete_object(Bucket=s3_bucket, Key=s3_path)
+            self.s3_client.delete_object(Bucket=s3_bucket, Key=s3_path)
             self.logger.info("Deleted s3://%s/%s", s3_bucket, s3_path)
 
             if files_uploaded > 1:
@@ -327,17 +328,17 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
                     else:
                         part_path = f"{s3_path}_part{part_num}.csv"
                     try:
-                        self.s3.delete_object(Bucket=s3_bucket, Key=part_path)
+                        self.s3_client.delete_object(Bucket=s3_bucket, Key=part_path)
                         self.logger.info("Deleted s3://%s/%s", s3_bucket, part_path)
-                    except Exception as e:
+                    except Exception as exc:
                         self.logger.warning(
                             "Failed to delete S3 file s3://%s/%s: %s",
-                            s3_bucket, part_path, str(e)
+                            s3_bucket, part_path, str(exc)
                         )
-        except Exception as e:
+        except Exception as exc:
             self.logger.warning(
                 "Failed to clean up S3 files from bucket %s: %s",
-                s3_bucket, str(e)
+                s3_bucket, str(exc)
             )
 
     def load_from_s3(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments

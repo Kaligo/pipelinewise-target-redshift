@@ -15,14 +15,14 @@ class FastSyncHandler:
     """Handles FAST_SYNC_RDS_S3_INFO messages and processes them in parallel"""
 
     @staticmethod
-    def validate_message(
+    def validate_and_extract_message(
         message: Dict[str, Any],
         schemas: Dict[str, Any],
         stream_to_sync: Dict[str, Any],
         line: str
     ) -> Tuple[str, Dict[str, Any]]:
         """
-        Validate FAST_SYNC_RDS_S3_INFO message and return stream/message tuple
+        Validate FAST_SYNC_RDS_S3_INFO message and extract stream/message tuple
 
         Args:
             message: Message dictionary
@@ -34,21 +34,34 @@ class FastSyncHandler:
             Tuple of (stream, message)
 
         Raises:
-            Exception: If message is invalid or stream not initialized
+            ValueError: If message is invalid or stream not initialized
         """
-        if 'stream' not in message:
-            raise Exception(f"Line is missing required key 'stream': {line}")
+        # Required fields for FAST_SYNC_RDS_S3_INFO message
+        required_fields = [
+            'stream',
+            's3_bucket',
+            's3_path',
+            's3_region',
+            'files_uploaded',
+            'replication_method'
+        ]
+        missing_fields = [field for field in required_fields if field not in message]
+        if missing_fields:
+            raise ValueError(
+                f"FAST_SYNC_RDS_S3_INFO message is missing required fields: {', '.join(missing_fields)}. "
+                f"Line: {line}"
+            )
 
         stream = message['stream']
 
         if stream not in schemas:
-            raise Exception(
+            raise ValueError(
                 f"A FAST_SYNC_RDS_S3_INFO message for stream {stream} was encountered "
                 "before a corresponding schema"
             )
 
         if stream not in stream_to_sync:
-            raise Exception(
+            raise ValueError(
                 f"A FAST_SYNC_RDS_S3_INFO message for stream {stream} was encountered "
                 "before stream was initialized"
             )
@@ -58,13 +71,14 @@ class FastSyncHandler:
     @staticmethod
     def load_batch(stream: str, message: Dict[str, Any], db_sync: Any) -> None:
         """Load data from S3 for a single stream (used for parallel processing)"""
-        # Extract message fields to avoid repeated lookups
-        s3_bucket = message.get('s3_bucket')
-        s3_path = message.get('s3_path')
-        s3_region = message.get('s3_region', 'us-east-1')
+        # Extract message fields (required fields already validated in validate_and_extract_message)
+        s3_bucket = message['s3_bucket']
+        s3_path = message['s3_path']
+        s3_region = message['s3_region']
+        files_uploaded = message['files_uploaded']
+        replication_method = message['replication_method']
+        # Optional field with default
         rows_uploaded = message.get('rows_uploaded', 0)
-        files_uploaded = message.get('files_uploaded', 1)
-        replication_method = message.get('replication_method')
 
         try:
             LOGGER.info(
@@ -84,8 +98,8 @@ class FastSyncHandler:
                 "Successfully loaded %s rows from S3 for stream %s",
                 rows_uploaded, stream
             )
-        except Exception as e:
-            LOGGER.error("Failed to load data from S3 for stream %s: %s", stream, str(e))
+        except Exception as exc:
+            LOGGER.error("Failed to load data from S3 for stream %s: %s", stream, str(exc))
             raise
 
     @staticmethod
@@ -99,6 +113,11 @@ class FastSyncHandler:
         if not fast_sync_queue:
             return
 
+        # Parallelism 0 means auto parallelism:
+        #
+        # Auto parallelism trying to flush streams efficiently with auto defined number
+        # of threads where the number of threads is the number of streams that need to
+        # be loaded but it's not greater than the value of max_parallelism
         if parallelism == 0:
             n_streams = len(fast_sync_queue)
             parallelism = min(n_streams, max_parallelism)
