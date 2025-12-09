@@ -112,14 +112,19 @@ This target supports **Fast Sync** mode when used with `tap-postgres` configured
 
 #### How Fast Sync Works
 
-1. **Source Side (tap-postgres)**: When fast sync is enabled, `tap-postgres` exports data directly from RDS PostgreSQL to S3 using `aws_s3.query_export_to_s3` and sends `FAST_SYNC_RDS_S3_INFO` messages.
+1. **Source Side (tap-postgres)**: When fast sync is enabled, `tap-postgres` exports data directly from RDS PostgreSQL to S3 using `aws_s3.query_export_to_s3` and embeds fast sync information in STATE messages under `bookmarks[stream_id]['fast_sync_s3_info']`.
 
-2. **Target Side (target-redshift)**: This target automatically detects `FAST_SYNC_RDS_S3_INFO` messages and:
-   - Creates a temporary staging table
-   - Loads data from S3 using Redshift's `COPY` command
-   - Merges data into the target table (INSERT/UPDATE)
-   - Detects deleted rows and sets `_SDC_DELETED_AT` timestamp
-   - Cleans up temporary tables and S3 files
+2. **Target Side (target-redshift)**: This target automatically extracts fast sync operations from STATE message bookmarks and:
+   - Queues fast sync operations for parallel processing
+   - Processes all queued operations together at the end (following the same pattern as regular stream flushing)
+   - For each operation:
+     - Creates a temporary staging table
+     - Loads data from S3 using Redshift's `COPY` command
+     - Merges data into the target table (INSERT/UPDATE)
+     - Detects deleted rows and sets `_SDC_DELETED_AT` timestamp
+     - Cleans up temporary tables and S3 files
+
+   Fast sync operations are processed in parallel using the same `parallelism` and `max_parallelism` configuration as regular stream flushing, allowing efficient processing of multiple streams simultaneously.
 
 #### Fast Sync Requirements
 
@@ -140,12 +145,17 @@ This target supports **Fast Sync** mode when used with `tap-postgres` configured
 
 - **Performance**: Direct COPY from S3 is much faster than record-by-record inserts
 - **Scalability**: Handles large tables efficiently
+- **Parallel Processing**: Multiple fast sync operations are queued and processed in parallel, following the same parallelism configuration as regular stream flushing
 - **Deletion Detection**: Automatically detects and marks deleted rows by comparing full table dumps
 - **Reduced Network Traffic**: Data flows directly from S3 to Redshift without intermediate processing
 
 #### Example Configuration
 
-No additional configuration is required in `target-redshift` for fast sync. The target automatically handles `FAST_SYNC_RDS_S3_INFO` messages when they are received from the tap.
+No additional configuration is required in `target-redshift` for fast sync. The target automatically extracts and processes fast sync operations from STATE message bookmarks when they are received from the tap.
+
+Fast sync operations use the same parallelism settings as regular stream flushing:
+- `parallelism`: Number of threads for processing fast sync operations (default: 0, auto-detect)
+- `max_parallelism`: Maximum number of parallel threads (default: 16)
 
 However, ensure your Redshift cluster has the proper IAM role configured:
 

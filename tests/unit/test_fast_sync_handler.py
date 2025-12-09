@@ -60,6 +60,37 @@ class TestFastSyncHandler:
         stream_to_sync['test_schema-test_table'] = db
         return stream_to_sync
 
+    def _test_validate_missing_field(self, field_name, expected_error_pattern):
+        """Helper to test validation failure for missing required fields"""
+        message = self._create_valid_message()
+        del message[field_name]
+
+        with pytest.raises(ValueError, match=expected_error_pattern):
+            FastSyncHandler.validate_and_extract_message(
+                message, self.schemas, {}, 'test line'
+            )
+
+    def _create_mock_loader(self, mock_loader_class):
+        """Helper to create and return a mock loader instance"""
+        mock_loader = MagicMock()
+        mock_loader_class.return_value = mock_loader
+        return mock_loader
+
+    def _create_fast_sync_queue_and_streams(self, num_streams=2):
+        """Helper to create fast_sync_queue and stream_to_sync dictionaries"""
+        fast_sync_queue = {}
+        stream_to_sync = {}
+
+        for i in range(1, num_streams + 1):
+            stream_name = f'stream{i}'
+            fast_sync_queue[stream_name] = self._create_valid_message(
+                rows_uploaded=100 * i,
+                replication_method='FULL_TABLE' if i == 1 else 'INCREMENTAL'
+            )
+            stream_to_sync[stream_name] = MagicMock()
+
+        return fast_sync_queue, stream_to_sync
+
     def test_validate_and_extract_message_success(self):
         """Test successful message validation and extraction"""
         stream_to_sync = self._create_stream_to_sync()
@@ -114,53 +145,23 @@ class TestFastSyncHandler:
 
     def test_validate_and_extract_message_missing_s3_bucket(self):
         """Test validation fails when s3_bucket is missing"""
-        message = self._create_valid_message()
-        del message['s3_bucket']
-
-        with pytest.raises(ValueError, match="missing required fields: s3_bucket"):
-            FastSyncHandler.validate_and_extract_message(
-                message, self.schemas, {}, 'test line'
-            )
+        self._test_validate_missing_field('s3_bucket', "missing required fields: s3_bucket")
 
     def test_validate_and_extract_message_missing_s3_path(self):
         """Test validation fails when s3_path is missing"""
-        message = self._create_valid_message()
-        del message['s3_path']
-
-        with pytest.raises(ValueError, match="missing required fields: s3_path"):
-            FastSyncHandler.validate_and_extract_message(
-                message, self.schemas, {}, 'test line'
-            )
+        self._test_validate_missing_field('s3_path', "missing required fields: s3_path")
 
     def test_validate_and_extract_message_missing_s3_region(self):
         """Test validation fails when s3_region is missing"""
-        message = self._create_valid_message()
-        del message['s3_region']
-
-        with pytest.raises(ValueError, match="missing required fields: s3_region"):
-            FastSyncHandler.validate_and_extract_message(
-                message, self.schemas, {}, 'test line'
-            )
+        self._test_validate_missing_field('s3_region', "missing required fields: s3_region")
 
     def test_validate_and_extract_message_missing_files_uploaded(self):
         """Test validation fails when files_uploaded is missing"""
-        message = self._create_valid_message()
-        del message['files_uploaded']
-
-        with pytest.raises(ValueError, match="missing required fields: files_uploaded"):
-            FastSyncHandler.validate_and_extract_message(
-                message, self.schemas, {}, 'test line'
-            )
+        self._test_validate_missing_field('files_uploaded', "missing required fields: files_uploaded")
 
     def test_validate_and_extract_message_missing_replication_method(self):
         """Test validation fails when replication_method is missing"""
-        message = self._create_valid_message()
-        del message['replication_method']
-
-        with pytest.raises(ValueError, match="missing required fields: replication_method"):
-            FastSyncHandler.validate_and_extract_message(
-                message, self.schemas, {}, 'test line'
-            )
+        self._test_validate_missing_field('replication_method', "missing required fields: replication_method")
 
     def test_validate_and_extract_message_missing_multiple_fields(self):
         """Test validation fails when multiple required fields are missing"""
@@ -179,8 +180,7 @@ class TestFastSyncHandler:
     @patch('target_redshift.fast_sync.handler.FastSyncLoader')
     def test_load_batch_success(self, mock_loader_class):
         """Test successful batch loading"""
-        mock_loader = MagicMock()
-        mock_loader_class.return_value = mock_loader
+        mock_loader = self._create_mock_loader(mock_loader_class)
 
         db = MagicMock()
         message = self._create_valid_message(rows_uploaded=100)
@@ -200,9 +200,8 @@ class TestFastSyncHandler:
     @patch('target_redshift.fast_sync.handler.FastSyncLoader')
     def test_load_batch_error(self, mock_loader_class):
         """Test batch loading error handling"""
-        mock_loader = MagicMock()
+        mock_loader = self._create_mock_loader(mock_loader_class)
         mock_loader.load_from_s3.side_effect = Exception("Load failed")
-        mock_loader_class.return_value = mock_loader
 
         db = MagicMock()
         message = self._create_valid_message(replication_method='INCREMENTAL')
@@ -223,8 +222,7 @@ class TestFastSyncHandler:
     @patch('target_redshift.fast_sync.handler.FastSyncLoader')
     def test_load_batch_without_rows_uploaded(self, mock_loader_class):
         """Test batch loading when rows_uploaded is not provided (optional field)"""
-        mock_loader = MagicMock()
-        mock_loader_class.return_value = mock_loader
+        mock_loader = self._create_mock_loader(mock_loader_class)
 
         db = MagicMock()
         message = self._create_valid_message(
@@ -262,14 +260,7 @@ class TestFastSyncHandler:
         mock_parallel_instance = MagicMock()
         mock_parallel_class.return_value = mock_parallel_instance
 
-        fast_sync_queue = {
-            'stream1': self._create_valid_message(rows_uploaded=100, replication_method='FULL_TABLE'),
-            'stream2': self._create_valid_message(rows_uploaded=200, replication_method='INCREMENTAL')
-        }
-        stream_to_sync = {
-            'stream1': MagicMock(),
-            'stream2': MagicMock()
-        }
+        fast_sync_queue, stream_to_sync = self._create_fast_sync_queue_and_streams(2)
 
         FastSyncHandler.flush_operations(fast_sync_queue, stream_to_sync, 2, 16)
 
@@ -282,16 +273,7 @@ class TestFastSyncHandler:
     @patch('target_redshift.fast_sync.handler.Parallel')
     def test_flush_operations_auto_parallelism(self, mock_parallel, mock_backend, mock_load_batch):
         """Test flush_operations with auto parallelism (parallelism=0)"""
-        fast_sync_queue = {
-            'stream1': self._create_valid_message(rows_uploaded=100),
-            'stream2': self._create_valid_message(rows_uploaded=200, replication_method='INCREMENTAL'),
-            'stream3': self._create_valid_message(rows_uploaded=300)
-        }
-        stream_to_sync = {
-            'stream1': MagicMock(),
-            'stream2': MagicMock(),
-            'stream3': MagicMock()
-        }
+        fast_sync_queue, stream_to_sync = self._create_fast_sync_queue_and_streams(3)
 
         # parallelism=0 should use min(n_streams, max_parallelism)
         FastSyncHandler.flush_operations(fast_sync_queue, stream_to_sync, 0, 2)

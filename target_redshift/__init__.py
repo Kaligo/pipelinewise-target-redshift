@@ -97,6 +97,35 @@ def flush_fast_sync_queue(fast_sync_queue, stream_to_sync, config):
     fast_sync_queue.clear()
 
 
+def extract_fast_sync_operations_from_state(state, schemas, stream_to_sync, line):
+    """Extract fast sync operations from state bookmarks.
+
+    S3 info is embedded in STATE messages under bookmarks[stream_id]['fast_sync_s3_info'].
+    This function processes these bookmarks and returns validated fast sync operations.
+
+    Returns:
+        Dictionary mapping stream names to validated fast sync messages.
+    """
+    operations = {}
+    for stream_id, bookmark in state.get('bookmarks', {}).items():
+        if 'fast_sync_s3_info' in bookmark:
+            s3_info = bookmark['fast_sync_s3_info']
+            # Convert to format expected by handler (add stream field)
+            message = dict(s3_info)
+            message['stream'] = stream_id
+
+            # Validate the fast sync operation
+            try:
+                stream, validated_message = FastSyncHandler.validate_and_extract_message(
+                    message, schemas, stream_to_sync, line
+                )
+                operations[stream] = validated_message
+            except ValueError as exc:
+                LOGGER.error("Failed to process fast_sync_s3_info for stream %s: %s", stream_id, str(exc))
+                raise exc
+    return operations
+
+
 def get_schema_names_from_config(config):
     default_target_schema = config.get('default_target_schema')
     schema_mapping = config.get('schema_mapping', {})
@@ -135,7 +164,7 @@ def persist_lines(config, lines, table_cache=None) -> None:
     row_count = {}
     stream_to_sync = {}
     total_row_count = {}
-    fast_sync_queue = {}  # Queue for FAST_SYNC_RDS_S3_INFO messages to process in parallel
+    fast_sync_queue = {}  # Queue for fast_sync_s3_info operations (extracted from STATE messages) to process in parallel
     batch_size_rows = config.get('batch_size_rows', DEFAULT_BATCH_SIZE_ROWS)
 
     # Loop over lines from stdin
@@ -261,16 +290,13 @@ def persist_lines(config, lines, table_cache=None) -> None:
         elif t == 'ACTIVATE_VERSION':
             LOGGER.debug('ACTIVATE_VERSION message')
 
-        elif t == 'FAST_SYNC_RDS_S3_INFO':
-            stream, message = FastSyncHandler.validate_and_extract_message(o, schemas, stream_to_sync, line)
-            fast_sync_queue[stream] = message
-
         elif t == 'STATE':
-            # Process any queued fast sync operations before updating state
-            flush_fast_sync_queue(fast_sync_queue, stream_to_sync, config)
-
             LOGGER.debug('Setting state to {}'.format(o['value']))
             state = o['value']
+
+            # Extract and queue fast sync operations from state bookmarks
+            operations = extract_fast_sync_operations_from_state(state, schemas, stream_to_sync, line)
+            fast_sync_queue.update(operations)
 
             # Initially set flushed state
             if not flushed_state:

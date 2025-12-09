@@ -1,7 +1,7 @@
 """
 Fast Sync Handler for target-redshift
 
-This module handles FAST_SYNC_RDS_S3_INFO messages and processes them in parallel.
+This module handles fast_sync_s3_info embedded in STATE messages and processes them in parallel.
 """
 from typing import Dict, Any, Tuple
 from joblib import Parallel, delayed, parallel_backend
@@ -12,23 +12,23 @@ LOGGER = get_logger('target_redshift')
 
 
 class FastSyncHandler:
-    """Handles FAST_SYNC_RDS_S3_INFO messages and processes them in parallel"""
+    """Handles fast_sync_s3_info embedded in STATE messages and processes them in parallel"""
 
     @staticmethod
     def validate_and_extract_message(
         message: Dict[str, Any],
         schemas: Dict[str, Any],
         stream_to_sync: Dict[str, Any],
-        line: str
+        line: str = ""
     ) -> Tuple[str, Dict[str, Any]]:
         """
-        Validate FAST_SYNC_RDS_S3_INFO message and extract stream/message tuple
+        Validate fast_sync_s3_info from STATE message and extract stream/message tuple
 
         Args:
-            message: Message dictionary
+            message: Message dictionary (extracted from STATE bookmarks)
             schemas: Dictionary of schemas
             stream_to_sync: Dictionary of stream sync instances
-            line: Original line for error reporting
+            line: Original line for error reporting (optional, for backward compatibility)
 
         Returns:
             Tuple of (stream, message)
@@ -36,7 +36,7 @@ class FastSyncHandler:
         Raises:
             ValueError: If message is invalid or stream not initialized
         """
-        # Required fields for FAST_SYNC_RDS_S3_INFO message
+        # Required fields for fast_sync_s3_info (embedded in STATE message)
         required_fields = [
             'stream',
             's3_bucket',
@@ -47,22 +47,22 @@ class FastSyncHandler:
         ]
         missing_fields = [field for field in required_fields if field not in message]
         if missing_fields:
-            raise ValueError(
-                f"FAST_SYNC_RDS_S3_INFO message is missing required fields: {', '.join(missing_fields)}. "
-                f"Line: {line}"
-            )
+            error_msg = f"fast_sync_s3_info is missing required fields: {', '.join(missing_fields)}"
+            if line:
+                error_msg += f". Line: {line}"
+            raise ValueError(error_msg)
 
         stream = message['stream']
 
         if stream not in schemas:
             raise ValueError(
-                f"A FAST_SYNC_RDS_S3_INFO message for stream {stream} was encountered "
+                f"A fast_sync_s3_info for stream {stream} was encountered "
                 "before a corresponding schema"
             )
 
         if stream not in stream_to_sync:
             raise ValueError(
-                f"A FAST_SYNC_RDS_S3_INFO message for stream {stream} was encountered "
+                f"A fast_sync_s3_info for stream {stream} was encountered "
                 "before stream was initialized"
             )
 
@@ -82,7 +82,7 @@ class FastSyncHandler:
 
         try:
             LOGGER.info(
-                "Processing FAST_SYNC_RDS_S3_INFO for stream %s: s3://%s/%s",
+                "Processing fast_sync_s3_info for stream %s: s3://%s/%s",
                 stream, s3_bucket, s3_path
             )
             loader = FastSyncLoader(db_sync)
@@ -109,7 +109,7 @@ class FastSyncHandler:
         parallelism: int,
         max_parallelism: int
     ) -> None:
-        """Process queued FAST_SYNC_RDS_S3_INFO messages in parallel"""
+        """Process queued fast_sync_s3_info operations in parallel"""
         if not fast_sync_queue:
             return
 
