@@ -67,15 +67,6 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
         """.strip()
 
     def _build_copy_options(self, s3_region: str) -> str:
-        """
-        Build COPY options string, ensuring REGION is included if not already present.
-
-        Args:
-            s3_region: AWS region where S3 bucket is located
-
-        Returns:
-            COPY options string with REGION included if not already present
-        """
         copy_options = self.connection_config.get('copy_options', """
             EMPTYASNULL BLANKSASNULL TRIMBLANKS TRUNCATECOLUMNS
             TIMEFORMAT 'auto'
