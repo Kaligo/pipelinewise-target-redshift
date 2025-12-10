@@ -103,11 +103,16 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
         self,
         stage_table: str,
         columns_with_trans: List[Dict[str, str]],
-        s3_copy_path: str,
-        copy_credentials: str,
-        copy_options: str
+        s3_bucket: str,
+        s3_path: str,
+        s3_region: str,
+        files_uploaded: int
     ) -> str:
         column_names = ', '.join(c['name'] for c in columns_with_trans)
+        s3_copy_path = self._build_s3_copy_path(s3_bucket, s3_path, files_uploaded)
+        copy_credentials = self._build_copy_credentials()
+        copy_options = self._build_copy_options(s3_region)
+
         return f"""COPY {stage_table} ({column_names})
             FROM '{s3_copy_path}'
             {copy_credentials}
@@ -393,12 +398,10 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
                 cur.execute(self.db_sync.create_table_query(is_stage=True))
 
                 # Build and execute COPY command
-                copy_credentials = self._build_copy_credentials()
-                copy_options = self._build_copy_options(s3_region)
-                s3_copy_path = self._build_s3_copy_path(s3_bucket, s3_path, files_uploaded)
                 copy_sql = self._build_copy_sql(
-                    stage_table, columns_with_trans, s3_copy_path,
-                    copy_credentials, copy_options
+                    stage_table, columns_with_trans,
+                    s3_bucket, s3_path, s3_region,
+                    files_uploaded
                 )
                 self.logger.debug("Running COPY query: %s", copy_sql)
                 cur.execute(copy_sql)

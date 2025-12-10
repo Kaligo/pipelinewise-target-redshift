@@ -18,7 +18,7 @@ from singer import get_logger
 from itertools import islice
 
 from target_redshift.db_sync import DbSync
-from target_redshift.fast_sync.handler import FastSyncHandler
+import target_redshift.fast_sync.handler as fast_sync_handler
 
 LOGGER = get_logger('target_redshift')
 
@@ -65,7 +65,7 @@ def add_metadata_columns_to_schema(schema_message):
     return extended_schema_message
 
 
-def add_metadata_values_to_record(record_message, stream_to_sync):
+def add_metadata_values_to_record(record_message):
     """Populate metadata _sdc columns from incoming record message
     The location of the required attributes are fixed in the stream
     """
@@ -85,45 +85,31 @@ def emit_state(state):
         sys.stdout.flush()
 
 
-def flush_fast_sync_queue(fast_sync_queue, stream_to_sync, config):
-    """Flush queued fast sync operations with parallelism from config and clear the queue"""
+def flush_fast_sync_queue(fast_sync_queue, stream_to_sync, config, flushed_state=None):  # pylint: disable=too-many-arguments
+    """Flush queued fast sync operations with parallelism from config and clear the queue.
+
+    Optionally cleans up fast_sync_s3_info from flushed_state bookmarks for processed streams.
+
+    Args:
+        fast_sync_queue: Dictionary of queued fast sync operations
+        stream_to_sync: Dictionary of stream sync instances
+        config: Configuration dictionary
+        flushed_state: Optional state dictionary to clean up fast_sync_s3_info from
+    """
     if not fast_sync_queue:
         return
+
     parallelism = config.get("parallelism", DEFAULT_PARALLELISM)
     max_parallelism = config.get("max_parallelism", DEFAULT_MAX_PARALLELISM)
-    FastSyncHandler.flush_operations(
+    fast_sync_handler.flush_operations(
         fast_sync_queue, stream_to_sync, parallelism, max_parallelism
     )
+
+    # Clean up fast_sync_s3_info from flushed_state if provided
+    if flushed_state:
+        fast_sync_handler.cleanup_fast_sync_s3_info_from_state(flushed_state, fast_sync_queue.keys())
+
     fast_sync_queue.clear()
-
-
-def extract_fast_sync_operations_from_state(state, schemas, stream_to_sync, line):
-    """Extract fast sync operations from state bookmarks.
-
-    S3 info is embedded in STATE messages under bookmarks[stream_id]['fast_sync_s3_info'].
-    This function processes these bookmarks and returns validated fast sync operations.
-
-    Returns:
-        Dictionary mapping stream names to validated fast sync messages.
-    """
-    operations = {}
-    for stream_id, bookmark in state.get('bookmarks', {}).items():
-        if 'fast_sync_s3_info' in bookmark:
-            s3_info = bookmark['fast_sync_s3_info']
-            # Convert to format expected by handler (add stream field)
-            message = dict(s3_info)
-            message['stream'] = stream_id
-
-            # Validate the fast sync operation
-            try:
-                stream, validated_message = FastSyncHandler.validate_and_extract_message(
-                    message, schemas, stream_to_sync, line
-                )
-                operations[stream] = validated_message
-            except ValueError as exc:
-                LOGGER.error("Failed to process fast_sync_s3_info for stream %s: %s", stream_id, str(exc))
-                raise exc
-    return operations
 
 
 def get_schema_names_from_config(config):
@@ -216,7 +202,7 @@ def persist_lines(config, lines, table_cache=None) -> None:
 
             # append record
             if config.get('add_metadata_columns') or config.get('hard_delete'):
-                records_to_load[stream][primary_key_string] = add_metadata_values_to_record(o, stream_to_sync[stream])
+                records_to_load[stream][primary_key_string] = add_metadata_values_to_record(o)
             else:
                 records_to_load[stream][primary_key_string] = o['record']
 
@@ -295,7 +281,7 @@ def persist_lines(config, lines, table_cache=None) -> None:
             state = o['value']
 
             # Extract and queue fast sync operations from state bookmarks
-            operations = extract_fast_sync_operations_from_state(state, schemas, stream_to_sync, line)
+            operations = fast_sync_handler.extract_operations_from_state(state, schemas, stream_to_sync)
             fast_sync_queue.update(operations)
 
             # Initially set flushed state
@@ -306,14 +292,14 @@ def persist_lines(config, lines, table_cache=None) -> None:
             raise Exception("Unknown message type {} in message {}"
                             .format(o['type'], o))
 
-    # Process any remaining fast sync operations
-    flush_fast_sync_queue(fast_sync_queue, stream_to_sync, config)
-
     # if some bucket has records that need to be flushed but haven't reached batch size
     # then flush all buckets.
     if sum(row_count.values()) > 0:
         # flush all streams one last time, delete records if needed, reset counts and then emit current state
         flushed_state = flush_streams(records_to_load, row_count, stream_to_sync, config, state, flushed_state)
+
+    # Process any remaining fast sync operations and clean up fast_sync_s3_info from flushed_state
+    flush_fast_sync_queue(fast_sync_queue, stream_to_sync, config, flushed_state)
 
     # emit latest state
     emit_state(copy.deepcopy(flushed_state))

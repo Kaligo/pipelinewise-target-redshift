@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import target_redshift
 from target_redshift import db_sync
+import target_redshift.fast_sync.handler as fast_sync_handler
 
 
 class TestTargetRedshift:
@@ -68,6 +69,47 @@ class TestTargetRedshift:
             'bookmarks': bookmarks
         }
 
+    def test_add_metadata_values_to_record(self):
+        """Test add_metadata_values_to_record adds metadata columns"""
+        record_message = {
+            'record': {'id': 1, 'name': 'test'},
+            'time_extracted': '2023-01-01T00:00:00Z'
+        }
+
+        result = target_redshift.add_metadata_values_to_record(record_message)
+
+        assert result['id'] == 1
+        assert result['name'] == 'test'
+        assert result['_sdc_extracted_at'] == '2023-01-01T00:00:00Z'
+        assert '_sdc_batched_at' in result
+        assert result['_sdc_deleted_at'] is None
+
+    def test_add_metadata_values_to_record_with_deleted_at(self):
+        """Test add_metadata_values_to_record with _sdc_deleted_at in record"""
+        record_message = {
+            'record': {
+                'id': 1,
+                'name': 'test',
+                '_sdc_deleted_at': '2023-01-01T00:00:00Z'
+            },
+            'time_extracted': '2023-01-01T00:00:00Z'
+        }
+
+        result = target_redshift.add_metadata_values_to_record(record_message)
+
+        assert result['_sdc_deleted_at'] == '2023-01-01T00:00:00Z'
+
+    def test_add_metadata_values_to_record_without_time_extracted(self):
+        """Test add_metadata_values_to_record without time_extracted"""
+        record_message = {
+            'record': {'id': 1, 'name': 'test'}
+        }
+
+        result = target_redshift.add_metadata_values_to_record(record_message)
+
+        assert result['_sdc_extracted_at'] is None
+        assert '_sdc_batched_at' in result
+
     @patch('target_redshift.flush_streams')
     @patch('target_redshift.DbSync')
     def test_persist_lines_with_40_records_and_batch_size_of_20_expect_flushing_once(
@@ -90,29 +132,29 @@ class TestTargetRedshift:
         flush_streams_mock.assert_called_once()
 
     def test_extract_fast_sync_operations_from_state_empty_state(self):
-        """Test extract_fast_sync_operations_from_state with empty state"""
+        """Test extract_operations_from_state with empty state"""
         state = {}
         stream_to_sync = self._create_stream_to_sync()
 
-        operations = target_redshift.extract_fast_sync_operations_from_state(
-            state, self.schemas, stream_to_sync, 'test line'
+        operations = fast_sync_handler.extract_operations_from_state(
+            state, self.schemas, stream_to_sync
         )
 
         assert operations == {}
 
     def test_extract_fast_sync_operations_from_state_no_bookmarks(self):
-        """Test extract_fast_sync_operations_from_state with state without bookmarks"""
+        """Test extract_operations_from_state with state without bookmarks"""
         state = {'currently_syncing': None}
         stream_to_sync = self._create_stream_to_sync()
 
-        operations = target_redshift.extract_fast_sync_operations_from_state(
-            state, self.schemas, stream_to_sync, 'test line'
+        operations = fast_sync_handler.extract_operations_from_state(
+            state, self.schemas, stream_to_sync
         )
 
         assert operations == {}
 
     def test_extract_fast_sync_operations_from_state_no_fast_sync_info(self):
-        """Test extract_fast_sync_operations_from_state with bookmarks but no fast_sync_s3_info"""
+        """Test extract_operations_from_state with bookmarks but no fast_sync_s3_info"""
         bookmarks = {
             'test_schema-test_table': {
                 'initial_full_table_complete': True
@@ -121,14 +163,14 @@ class TestTargetRedshift:
         state = self._create_state_with_bookmarks(bookmarks)
         stream_to_sync = self._create_stream_to_sync()
 
-        operations = target_redshift.extract_fast_sync_operations_from_state(
-            state, self.schemas, stream_to_sync, 'test line'
+        operations = fast_sync_handler.extract_operations_from_state(
+            state, self.schemas, stream_to_sync
         )
 
         assert operations == {}
 
     def test_extract_fast_sync_operations_from_state_single_operation(self):
-        """Test extract_fast_sync_operations_from_state with single fast_sync_s3_info"""
+        """Test extract_operations_from_state with single fast_sync_s3_info"""
         s3_info = self._create_fast_sync_s3_info()
         bookmarks = {
             'test_schema-test_table': {
@@ -138,8 +180,8 @@ class TestTargetRedshift:
         state = self._create_state_with_bookmarks(bookmarks)
         stream_to_sync = self._create_stream_to_sync()
 
-        operations = target_redshift.extract_fast_sync_operations_from_state(
-            state, self.schemas, stream_to_sync, 'test line'
+        operations = fast_sync_handler.extract_operations_from_state(
+            state, self.schemas, stream_to_sync
         )
 
         assert len(operations) == 1
@@ -153,7 +195,7 @@ class TestTargetRedshift:
         assert operation['rows_uploaded'] == 100
 
     def test_extract_fast_sync_operations_from_state_multiple_operations(self):
-        """Test extract_fast_sync_operations_from_state with multiple fast_sync_s3_info"""
+        """Test extract_operations_from_state with multiple fast_sync_s3_info"""
         s3_info_1 = self._create_fast_sync_s3_info(
             s3_path='test/path/data1.csv',
             rows_uploaded=100
@@ -193,8 +235,8 @@ class TestTargetRedshift:
         }
         state = self._create_state_with_bookmarks(bookmarks)
 
-        operations = target_redshift.extract_fast_sync_operations_from_state(
-            state, schemas, stream_to_sync, 'test line'
+        operations = fast_sync_handler.extract_operations_from_state(
+            state, schemas, stream_to_sync
         )
 
         assert len(operations) == 2
@@ -205,7 +247,7 @@ class TestTargetRedshift:
         assert operations['test_schema-test_table2']['replication_method'] == 'INCREMENTAL'
 
     def test_extract_fast_sync_operations_from_state_mixed_bookmarks(self):
-        """Test extract_fast_sync_operations_from_state with mixed bookmarks"""
+        """Test extract_operations_from_state with mixed bookmarks"""
         s3_info = self._create_fast_sync_s3_info()
         bookmarks = {
             'test_schema-test_table': {
@@ -219,15 +261,15 @@ class TestTargetRedshift:
         state = self._create_state_with_bookmarks(bookmarks)
         stream_to_sync = self._create_stream_to_sync()
 
-        operations = target_redshift.extract_fast_sync_operations_from_state(
-            state, self.schemas, stream_to_sync, 'test line'
+        operations = fast_sync_handler.extract_operations_from_state(
+            state, self.schemas, stream_to_sync
         )
 
         assert len(operations) == 1
         assert 'test_schema-test_table' in operations
 
     def test_extract_fast_sync_operations_from_state_invalid_message(self):
-        """Test extract_fast_sync_operations_from_state with invalid fast_sync_s3_info"""
+        """Test extract_operations_from_state with invalid fast_sync_s3_info"""
         s3_info = {
             's3_bucket': 'test-bucket'
             # Missing required fields
@@ -241,12 +283,12 @@ class TestTargetRedshift:
         stream_to_sync = self._create_stream_to_sync()
 
         with pytest.raises(ValueError):
-            target_redshift.extract_fast_sync_operations_from_state(
-                state, self.schemas, stream_to_sync, 'test line'
+            fast_sync_handler.extract_operations_from_state(
+                state, self.schemas, stream_to_sync
             )
 
     def test_extract_fast_sync_operations_from_state_missing_stream(self):
-        """Test extract_fast_sync_operations_from_state with stream not in stream_to_sync"""
+        """Test extract_operations_from_state with stream not in stream_to_sync"""
         s3_info = self._create_fast_sync_s3_info()
         bookmarks = {
             'unknown_stream': {
@@ -257,8 +299,8 @@ class TestTargetRedshift:
         stream_to_sync = {}
 
         with pytest.raises(ValueError):
-            target_redshift.extract_fast_sync_operations_from_state(
-                state, self.schemas, stream_to_sync, 'test line'
+            fast_sync_handler.extract_operations_from_state(
+                state, self.schemas, stream_to_sync
             )
 
     def test_flush_fast_sync_queue_empty_queue(self):
@@ -272,7 +314,7 @@ class TestTargetRedshift:
 
         assert fast_sync_queue == {}
 
-    @patch('target_redshift.FastSyncHandler.flush_operations')
+    @patch('target_redshift.fast_sync.handler.flush_operations')
     def test_flush_fast_sync_queue_with_operations(self, mock_flush_operations):
         """Test flush_fast_sync_queue with queued operations"""
         fast_sync_queue = {
@@ -298,7 +340,7 @@ class TestTargetRedshift:
         )
         assert fast_sync_queue == {}
 
-    @patch('target_redshift.FastSyncHandler.flush_operations')
+    @patch('target_redshift.fast_sync.handler.flush_operations')
     def test_flush_fast_sync_queue_default_parallelism(self, mock_flush_operations):
         """Test flush_fast_sync_queue with default parallelism values"""
         fast_sync_queue = {
@@ -320,7 +362,58 @@ class TestTargetRedshift:
         )
         assert fast_sync_queue == {}
 
-    @patch('target_redshift.FastSyncHandler.flush_operations')
+    def test_cleanup_fast_sync_s3_info_from_state(self):
+        """Test cleanup_fast_sync_s3_info_from_state removes fast_sync_s3_info from bookmarks"""
+        state = {
+            'bookmarks': {
+                'test_schema-test_table': {
+                    'fast_sync_s3_info': {
+                        's3_bucket': 'test-bucket',
+                        's3_path': 'test/path/data.csv'
+                    },
+                    'other_bookmark': 'value'
+                },
+                'test_schema-test_table2': {
+                    'fast_sync_s3_info': {
+                        's3_bucket': 'test-bucket',
+                        's3_path': 'test/path/data2.csv'
+                    }
+                },
+                'test_schema-test_table3': {
+                    'other_bookmark': 'value'
+                }
+            }
+        }
+
+        processed_streams = ['test_schema-test_table', 'test_schema-test_table2']
+
+        fast_sync_handler.cleanup_fast_sync_s3_info_from_state(state, processed_streams)
+
+        # Verify fast_sync_s3_info was removed from processed streams
+        assert 'fast_sync_s3_info' not in state['bookmarks']['test_schema-test_table']
+        assert 'other_bookmark' in state['bookmarks']['test_schema-test_table']
+        assert 'fast_sync_s3_info' not in state['bookmarks']['test_schema-test_table2']
+        # Verify unprocessed stream is unchanged
+        assert 'fast_sync_s3_info' not in state['bookmarks']['test_schema-test_table3']
+        assert 'other_bookmark' in state['bookmarks']['test_schema-test_table3']
+
+    def test_cleanup_fast_sync_s3_info_from_state_empty_state(self):
+        """Test cleanup_fast_sync_s3_info_from_state with empty state"""
+        state = {}
+        processed_streams = ['test_schema-test_table']
+
+        # Should not raise any exception - function handles empty state gracefully
+        fast_sync_handler.cleanup_fast_sync_s3_info_from_state(state, processed_streams)
+
+    def test_cleanup_fast_sync_s3_info_from_state_no_bookmarks(self):
+        """Test cleanup_fast_sync_s3_info_from_state with state without bookmarks"""
+        state = {'currently_syncing': None}
+        processed_streams = ['test_schema-test_table']
+
+        # Should not raise any exception - function handles missing bookmarks gracefully
+        fast_sync_handler.cleanup_fast_sync_s3_info_from_state(state, processed_streams)
+
+    @patch('target_redshift.fast_sync.handler.flush_operations')
     @patch('target_redshift.flush_streams')
     @patch('target_redshift.DbSync')
     def test_persist_lines_with_state_containing_fast_sync_info(

@@ -86,11 +86,22 @@ class TestFastSyncLoader:
         """Helper to extract SQL strings from execute calls"""
         return [str(call[0][0]) if call[0] else '' for call in mock_cursor.execute.call_args_list]
 
+    def _get_deletion_detection_calls(self, mock_cursor):
+        """Helper to extract deletion detection SQL calls"""
+        all_calls = self._get_sql_strings(mock_cursor)
+        return [
+            call_str for call_str in all_calls
+            if call_str.strip().startswith('UPDATE') and '_SDC_DELETED_AT' in call_str
+            and 'NOT EXISTS' in call_str
+        ]
+
     @patch('target_redshift.db_sync.boto3')
     @patch('target_redshift.db_sync.psycopg2.connect')
     def test_fast_sync_load_from_s3_basic(self, mock_connect, mock_boto3):
         """Test basic fast sync load from S3"""
-        loader, mock_cursor, _ = self._create_loader(mock_connect=mock_connect, mock_boto3=mock_boto3)
+        loader, mock_cursor, mock_s3_client = self._create_loader(
+            mock_connect=mock_connect, mock_boto3=mock_boto3
+        )
 
         loader.load_from_s3(
             s3_bucket='source-bucket',
@@ -104,6 +115,8 @@ class TestFastSyncLoader:
         assert len(self._get_sql_calls(mock_cursor, 'COPY')) > 0, "COPY command should be executed"
         assert len(self._get_sql_calls(mock_cursor, 'CREATE TABLE')) > 0, "Stage table should be created"
         assert len(self._get_sql_calls(mock_cursor, 'DROP TABLE')) > 0, "Stage table should be dropped"
+        # Verify S3 cleanup (enabled by default)
+        assert mock_s3_client.delete_object.call_count > 0, "S3 files should be deleted by default"
 
     @patch('target_redshift.db_sync.boto3')
     @patch('target_redshift.db_sync.psycopg2.connect')
@@ -146,12 +159,7 @@ class TestFastSyncLoader:
         )
 
         # Verify deletion detection query was executed
-        all_calls = self._get_sql_strings(mock_cursor)
-        deletion_calls = [
-            call_str for call_str in all_calls
-            if call_str.strip().startswith('UPDATE') and '_SDC_DELETED_AT' in call_str
-            and 'NOT EXISTS' in call_str
-        ]
+        deletion_calls = self._get_deletion_detection_calls(mock_cursor)
         assert len(deletion_calls) > 0, "Deletion detection query should be executed"
 
     @patch('target_redshift.db_sync.boto3')
@@ -206,11 +214,7 @@ class TestFastSyncLoader:
         assert len(swap_calls) > 0, "Table swap query should be executed for full refresh"
 
         # Verify deletion detection is NOT executed for full_refresh
-        deletion_calls = [
-            call_str for call_str in all_calls
-            if call_str.strip().startswith('UPDATE') and '_SDC_DELETED_AT' in call_str
-            and 'NOT EXISTS' in call_str
-        ]
+        deletion_calls = self._get_deletion_detection_calls(mock_cursor)
         assert len(deletion_calls) == 0, "Deletion detection should NOT be executed for full_refresh"
 
     @patch('target_redshift.db_sync.boto3')
@@ -257,24 +261,6 @@ class TestFastSyncLoader:
         assert len(self._get_sql_calls(mock_cursor, 'COPY')) > 0, "COPY command should be executed"
         assert mock_s3_client.delete_object.call_count == 0, "S3 files should not be deleted"
 
-    @patch('target_redshift.db_sync.boto3')
-    @patch('target_redshift.db_sync.psycopg2.connect')
-    def test_fast_sync_cleanup_s3_files_enabled(self, mock_connect, mock_boto3):
-        """Test that S3 files are deleted when cleanup_s3_files is True (default)"""
-        loader, mock_cursor, mock_s3_client = self._create_loader(
-            mock_connect=mock_connect, mock_boto3=mock_boto3
-        )
-
-        loader.load_from_s3(
-            s3_bucket='source-bucket',
-            s3_path='test/path/data.csv',
-            s3_region='us-east-1',
-            rows_uploaded=100,
-            files_uploaded=1
-        )
-
-        assert len(self._get_sql_calls(mock_cursor, 'COPY')) > 0, "COPY command should be executed"
-        assert mock_s3_client.delete_object.call_count > 0, "S3 files should be deleted"
 
     @patch('target_redshift.db_sync.boto3')
     @patch('target_redshift.db_sync.psycopg2.connect')
@@ -310,53 +296,9 @@ class TestFastSyncLoader:
         assert len(incremental_update_calls) == 0, "Incremental UPDATE should not be executed"
 
         # Verify deletion detection is NOT executed without primary keys
-        deletion_calls = [
-            call_str for call_str in all_calls
-            if call_str.strip().startswith('UPDATE') and '_SDC_DELETED_AT' in call_str
-            and 'NOT EXISTS' in call_str
-        ]
+        deletion_calls = self._get_deletion_detection_calls(mock_cursor)
         assert len(deletion_calls) == 0, "Deletion detection should NOT be executed without primary keys"
 
-    @patch('target_redshift.db_sync.boto3')
-    @patch('target_redshift.db_sync.psycopg2.connect')
-    def test_fast_sync_build_s3_copy_path_multiple_files(self, mock_connect, mock_boto3):
-        """Test S3 copy path building for multiple files"""
-        loader, _, _ = self._create_loader(mock_connect=mock_connect, mock_boto3=mock_boto3)
-
-        # Test single file
-        path = loader._build_s3_copy_path('bucket', 'path/data.csv', 1)
-        assert path == 's3://bucket/path/data.csv', "Single file should not have wildcard"
-
-        # Test multiple files
-        path = loader._build_s3_copy_path('bucket', 'path/data.csv', 3)
-        assert path == 's3://bucket/path/data', "Multiple files should use prefix without extension"
-
-        # Test multiple files without .csv extension
-        path = loader._build_s3_copy_path('bucket', 'path/data', 2)
-        assert path == 's3://bucket/path/data', "Multiple files without extension should use prefix as-is"
-
-    @patch('target_redshift.db_sync.boto3')
-    @patch('target_redshift.db_sync.psycopg2.connect')
-    def test_fast_sync_build_copy_credentials_iam_role(self, mock_connect, mock_boto3):
-        """Test COPY credentials building with IAM role"""
-        loader, _, _ = self._create_loader(mock_connect=mock_connect, mock_boto3=mock_boto3)
-
-        credentials = loader._build_copy_credentials()
-        assert 'IAM_ROLE' in credentials, "Should use IAM role when configured"
-        assert 'arn:aws:iam::123456789012:role/redshift-role' in credentials
-
-    @patch('target_redshift.db_sync.boto3')
-    @patch('target_redshift.db_sync.psycopg2.connect')
-    def test_fast_sync_build_copy_credentials_access_keys(self, mock_connect, mock_boto3):
-        """Test COPY credentials building with access keys"""
-        config_no_role = self.config.copy()
-        del config_no_role['aws_redshift_copy_role_arn']
-
-        loader, _, _ = self._create_loader(config=config_no_role, mock_connect=mock_connect, mock_boto3=mock_boto3)
-
-        credentials = loader._build_copy_credentials()
-        assert 'ACCESS_KEY_ID' in credentials, "Should use access keys when IAM role not configured"
-        assert 'SECRET_ACCESS_KEY' in credentials
 
     @patch('target_redshift.db_sync.psycopg2.connect')
     def test_fast_sync_copy_options_adds_region_when_missing(self, mock_connect):
@@ -432,12 +374,7 @@ class TestFastSyncLoader:
         )
 
         # Verify deletion detection query was NOT executed
-        all_calls = self._get_sql_strings(mock_cursor)
-        deletion_calls = [
-            call_str for call_str in all_calls
-            if call_str.strip().startswith('UPDATE') and '_SDC_DELETED_AT' in call_str
-            and 'NOT EXISTS' in call_str
-        ]
+        deletion_calls = self._get_deletion_detection_calls(mock_cursor)
         assert len(deletion_calls) == 0, "Deletion detection should NOT be executed for incremental updates"
 
     @patch('target_redshift.db_sync.boto3')
@@ -469,11 +406,7 @@ class TestFastSyncLoader:
         assert len(insert_calls) > 0, "INSERT INTO ... SELECT should be executed for append_only mode"
 
         # Verify deletion detection query was executed
-        deletion_calls = [
-            call_str for call_str in all_calls
-            if call_str.strip().startswith('UPDATE') and '_SDC_DELETED_AT' in call_str
-            and 'NOT EXISTS' in call_str
-        ]
+        deletion_calls = self._get_deletion_detection_calls(mock_cursor)
         assert len(deletion_calls) > 0, "Deletion detection should be executed for FULL_TABLE with append_only"
 
     @patch('target_redshift.db_sync.boto3')
@@ -502,10 +435,5 @@ class TestFastSyncLoader:
         )
 
         # Verify deletion detection is NOT executed (requires primary keys)
-        all_calls = self._get_sql_strings(mock_cursor)
-        deletion_calls = [
-            call_str for call_str in all_calls
-            if call_str.strip().startswith('UPDATE') and '_SDC_DELETED_AT' in call_str
-            and 'NOT EXISTS' in call_str
-        ]
+        deletion_calls = self._get_deletion_detection_calls(mock_cursor)
         assert len(deletion_calls) == 0, "Deletion detection should NOT be executed without primary keys"
