@@ -117,7 +117,6 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
             {copy_credentials}
             {copy_options}
             CSV
-            IGNOREHEADER 1
         """.strip()
 
     def _perform_full_refresh(
