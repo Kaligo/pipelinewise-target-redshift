@@ -174,7 +174,7 @@ However, ensure your Redshift cluster has the proper IAM role configured:
 }
 ```
 
-For more information about setting up fast sync on the tap side, see the [tap-postgres Fast Sync documentation](../pipelinewise-tap-postgres/FAST_SYNC_SETUP.md).
+For more information about setting up fast sync on the tap side, see the [tap-postgres Fast Sync documentation](https://github.com/Kaligo/pipelinewise-tap-postgres?tab=readme-ov-file#fast-sync-rds-requirements).
 
 ### To run tests:
 
