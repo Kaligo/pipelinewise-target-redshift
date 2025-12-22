@@ -7,10 +7,35 @@ It extracts data loading logic from DbSync to provide a cleaner separation of co
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Dict, List, Tuple, Any
 import psycopg2.extras
 
 from target_redshift.db_sync import safe_column_name, column_trans, primary_column_names
+
+
+@dataclass
+class FastSyncS3Info:
+    """Value object representing fast sync S3 information from STATE messages."""
+
+    s3_bucket: str
+    s3_path: str
+    s3_region: str
+    files_uploaded: int
+    replication_method: str
+    rows_uploaded: int = 0
+
+    @classmethod
+    def from_message(cls, message: Dict[str, Any]) -> "FastSyncS3Info":
+        """Create FastSyncS3Info from a message dictionary."""
+        return cls(
+            s3_bucket=message["s3_bucket"],
+            s3_path=message["s3_path"],
+            s3_region=message["s3_region"],
+            files_uploaded=message["files_uploaded"],
+            replication_method=message["replication_method"],
+            rows_uploaded=message.get("rows_uploaded", 0),
+        )
 
 
 class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instance-attributes
@@ -91,28 +116,25 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
         return f"{copy_options} REGION '{escaped_region}'"
 
     @staticmethod
-    def _build_s3_copy_path(s3_bucket: str, s3_path: str, files_uploaded: int) -> str:
-        s3_copy_path = f"s3://{s3_bucket}/{s3_path}"
-        if files_uploaded > 1 and s3_copy_path.endswith(".csv"):
+    def _build_s3_copy_path(s3_info: FastSyncS3Info) -> str:
+        s3_copy_path = f"s3://{s3_info.s3_bucket}/{s3_info.s3_path}"
+        if s3_info.files_uploaded > 1 and s3_copy_path.endswith(".csv"):
             # For multiple files, use prefix pattern.
             s3_copy_path = s3_copy_path[:-4]
         return s3_copy_path
 
-    def _build_copy_sql(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    def _build_copy_sql(
         self,
-        stage_table: str,
+        table_name: str,
         columns_with_trans: List[Dict[str, str]],
-        s3_bucket: str,
-        s3_path: str,
-        s3_region: str,
-        files_uploaded: int,
+        s3_info: FastSyncS3Info,
     ) -> str:
         column_names = ", ".join(c["name"] for c in columns_with_trans)
-        s3_copy_path = self._build_s3_copy_path(s3_bucket, s3_path, files_uploaded)
+        s3_copy_path = self._build_s3_copy_path(s3_info)
         copy_credentials = self._build_copy_credentials()
-        copy_options = self._build_copy_options(s3_region)
+        copy_options = self._build_copy_options(s3_info.s3_region)
 
-        return f"""COPY {stage_table} ({column_names})
+        return f"""COPY {table_name} ({column_names})
             FROM '{s3_copy_path}'
             {copy_credentials}
             {copy_options}
@@ -233,29 +255,33 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
             )
         return deletions
 
-    def _insert_all_records(
+    def _append_all_records(
         self,
         cur: Any,
         target_table: str,
-        stage_table: str,
         columns_with_trans: List[Dict[str, str]],
-    ) -> int:
+        s3_info: FastSyncS3Info,
+    ) -> None:
         """
-        Insert all records from stage table to target table.
+        Append all records from S3 files directly to target table using COPY command.
 
-        Uses INSERT INTO ... SELECT to copy all records. This works reliably
-        inside transactions, unlike ALTER TABLE APPEND which has transaction limitations.
+        This method bypasses the stage table and directly copies data from S3 to the
+        target table. In Redshift, COPY command always appends new data to the target table.
+
+        Args:
+            cur: Database cursor
+            target_table: Target table name (already sanitized)
+            columns_with_trans: List of column definitions
+            s3_info: FastSyncS3Info value object containing S3 information
         """
-        self.logger.info("Inserting all records to the target table")
-        column_names = ", ".join(c["name"] for c in columns_with_trans)
-        column_values = ", ".join(f"s.{c['name']}" for c in columns_with_trans)
-        insert_sql = f"""INSERT INTO {target_table} ({column_names})
-            SELECT {column_values}
-            FROM {stage_table} s
-        """
-        self.logger.debug("Running query: %s", insert_sql)
-        cur.execute(insert_sql)
-        return cur.rowcount
+        self.logger.info("Appending all records directly to target table %s", target_table)
+        copy_sql = self._build_copy_sql(
+            target_table,
+            columns_with_trans,
+            s3_info,
+        )
+        self.logger.debug("Running COPY query: %s", copy_sql)
+        cur.execute(copy_sql)
 
     def _merge_data(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
@@ -264,8 +290,7 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
         target_table: str,
         stage_table: str,
         columns_with_trans: List[Dict[str, str]],
-        rows_uploaded: int = 0,
-        replication_method: str = None,
+        s3_info: FastSyncS3Info,
     ) -> Tuple[int, int, int]:
         """
         Merge data from stage table into target table
@@ -276,7 +301,7 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
             target_table: Target table name (already sanitized)
             stage_table: Stage table name (already sanitized)
             columns_with_trans: List of column definitions
-            rows_uploaded: Number of rows uploaded (for tables without primary key)
+            s3_info: FastSyncS3Info value object containing S3 information
 
         Returns:
             Tuple of (inserts, updates, deletions) counts
@@ -290,12 +315,7 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
             self._perform_full_refresh(
                 cur, stream_schema_message["stream"], target_table, stage_table
             )
-            inserts = rows_uploaded
-        elif self.append_only or not has_key_properties:
-            # Append the whole stage table to the target one.
-            inserts = self._insert_all_records(
-                cur, target_table, stage_table, columns_with_trans
-            )
+            inserts = s3_info.rows_uploaded
         else:
             # Incremental update. Default mode.
             updates = self._update_existing_records(
@@ -311,7 +331,7 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
 
         if (
             self.detect_deletions
-            and replication_method == "FULL_TABLE"
+            and s3_info.replication_method == "FULL_TABLE"
             and has_key_properties
             and not self.full_refresh
         ):
@@ -319,6 +339,75 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
             deletions = self._detect_deletions(
                 cur, target_table, stage_table, columns_with_trans
             )
+
+        return inserts, updates, deletions
+
+    def _load_via_staging(  # pylint: disable=too-many-arguments
+        self,
+        cur: Any,
+        stream_schema_message: Dict[str, Any],
+        target_table: str,
+        columns_with_trans: List[Dict[str, str]],
+        s3_info: FastSyncS3Info,
+    ) -> Tuple[int, int, int]:
+        """
+        Load data from S3 via staging table and merge into target table.
+
+        This method handles both full refresh and incremental merge operations:
+        - Creates a temporary stage table
+        - Loads data from S3 into stage table using COPY command
+        - Merges data into target table (via _merge_data):
+          * If full_refresh=True: Performs table swap (replaces entire table)
+          * Otherwise: Performs incremental merge (UPDATE existing records, INSERT new records)
+        - Detects deletions and sets _SDC_DELETED_AT (if enabled and conditions are met)
+        - Cleans up stage table
+
+        Args:
+            cur: Database cursor
+            stream_schema_message: Stream schema message
+            target_table: Target table name (already sanitized)
+            columns_with_trans: List of column definitions
+            s3_info: FastSyncS3Info value object containing S3 information
+
+        Returns:
+            Tuple of (inserts, updates, deletions) counts
+        """
+        stream = stream_schema_message["stream"]
+        stage_table = self.db_sync.table_name(stream, is_stage=True)
+
+        self.logger.info(
+            "Fast sync: Loading %s rows from s3://%s/%s into '%s'",
+            s3_info.rows_uploaded,
+            s3_info.s3_bucket,
+            s3_info.s3_path,
+            stage_table,
+        )
+
+        # Create stage table
+        cur.execute(self.db_sync.drop_table_query(is_stage=True))
+        cur.execute(self.db_sync.create_table_query(is_stage=True))
+
+        # Build and execute COPY command to load data into stage table
+        copy_sql = self._build_copy_sql(
+            stage_table,
+            columns_with_trans,
+            s3_info,
+        )
+        self.logger.debug("Running COPY query: %s", copy_sql)
+        cur.execute(copy_sql)
+
+        # Merge data into target table (includes deletion detection if enabled)
+        inserts, updates, deletions = self._merge_data(
+            cur,
+            stream_schema_message,
+            target_table,
+            stage_table,
+            columns_with_trans,
+            s3_info,
+        )
+
+        # Drop stage table
+        cur.execute(self.db_sync.drop_table_query(is_stage=True))
 
         return inserts, updates, deletions
 
@@ -352,44 +441,38 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
                 "Failed to clean up S3 files from bucket %s: %s", s3_bucket, str(exc)
             )
 
-    def load_from_s3(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
+    def load_from_s3(  # pylint: disable=too-many-locals
         self,
-        s3_bucket: str,
-        s3_path: str,
-        s3_region: str = "us-east-1",
-        rows_uploaded: int = 0,
-        files_uploaded: int = 1,
-        replication_method: str = None,
+        s3_info: FastSyncS3Info,
     ) -> None:
         """
         Load data from S3 using fast sync strategy.
 
-        This method:
-        1. Creates a temporary table
-        2. Loads data from S3 using COPY command
-        3. Merges data into target table (INSERT/UPDATE/APPEND)
-        4. Detects deletions and sets _SDC_DELETED_AT
-        5. Cleans up temporary table and S3 files
+        This method handles two modes:
+        1. Append-only mode (append_only=True or no primary keys):
+           - Directly copies data from S3 to target table using COPY command
+           - No stage table is created
+           - No merge or deletion detection is performed
+           - More efficient as it bypasses staging and merge operations
+
+        2. Staging table mode (default when primary keys exist):
+           - Uses _load_via_staging to load data via a temporary stage table
+           - Handles both full refresh (table swap) and incremental merge (UPDATE/INSERT)
+           - Detects deletions and sets _SDC_DELETED_AT (if enabled and conditions are met)
+           - See _load_via_staging for detailed behavior
+
+        Both modes clean up S3 files after successful processing (if enabled).
 
         Args:
-            s3_bucket: S3 bucket name
-            s3_path: S3 path/prefix for the data files
-            s3_region: AWS region where S3 bucket is located
-            rows_uploaded: Number of rows uploaded (for logging)
-            files_uploaded: Number of files uploaded (for handling multiple files)
-            replication_method: Replication method from the message (e.g., 'FULL_TABLE', 'INCREMENTAL', 'LOG_BASED')
+            s3_info: FastSyncS3Info value object containing S3 information
         """
         stream_schema_message = self.stream_schema_message
         stream = stream_schema_message["stream"]
-        stage_table = self.db_sync.table_name(stream, is_stage=True)
         target_table = self.db_sync.table_name(stream, is_stage=False)
+        has_key_properties = len(stream_schema_message["key_properties"]) > 0
 
         self.logger.info(
-            "Fast sync: Loading %s rows from s3://%s/%s into '%s'",
-            rows_uploaded,
-            s3_bucket,
-            s3_path,
-            stage_table,
+            "Fast sync: Loading data from S3 into '%s'", target_table
         )
 
         columns_with_trans = [
@@ -399,49 +482,40 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
 
         with self.db_sync.open_connection() as connection:
             with connection.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-                # Create stage table
-                cur.execute(self.db_sync.drop_table_query(is_stage=True))
-                cur.execute(self.db_sync.create_table_query(is_stage=True))
+                inserts = updates = deletions = 0
 
-                # Build and execute COPY command
-                copy_sql = self._build_copy_sql(
-                    stage_table,
-                    columns_with_trans,
-                    s3_bucket,
-                    s3_path,
-                    s3_region,
-                    files_uploaded,
-                )
-                self.logger.debug("Running COPY query: %s", copy_sql)
-                cur.execute(copy_sql)
-
-                # Merge data into target table
-                inserts, updates, deletions = self._merge_data(
-                    cur,
-                    stream_schema_message,
-                    target_table,
-                    stage_table,
-                    columns_with_trans,
-                    rows_uploaded,
-                    replication_method,
-                )
-
-                # Drop stage table
-                cur.execute(self.db_sync.drop_table_query(is_stage=True))
+                if self.append_only or not has_key_properties:
+                    # Append-only mode: directly copy from S3 to target table
+                    inserts = s3_info.rows_uploaded
+                    self._append_all_records(
+                        cur,
+                        target_table,
+                        columns_with_trans,
+                        s3_info,
+                    )
+                else:
+                    # Staging table mode: load via staging table and merge
+                    inserts, updates, deletions = self._load_via_staging(
+                        cur,
+                        stream_schema_message,
+                        target_table,
+                        columns_with_trans,
+                        s3_info,
+                    )
 
                 if self.cleanup_s3_files:
                     # Clean up S3 files
-                    self._cleanup_s3_files(s3_bucket, s3_path, files_uploaded)
+                    self._cleanup_s3_files(s3_info.s3_bucket, s3_info.s3_path, s3_info.files_uploaded)
 
                 self.logger.info(
                     "Fast sync completed for %s: %s",
-                    self.db_sync.table_name(stream, False),
+                    target_table,
                     json.dumps(
                         {
                             "inserts": inserts,
                             "updates": updates,
                             "deletions": deletions,
-                            "rows_loaded": rows_uploaded,
+                            "rows_loaded": s3_info.rows_uploaded,
                         }
                     ),
                 )
