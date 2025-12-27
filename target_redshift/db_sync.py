@@ -25,6 +25,10 @@ DEFAULT_VARCHAR_LENGTH = 10000
 SHORT_VARCHAR_LENGTH = 256
 LONG_VARCHAR_LENGTH = 65535
 
+# Metadata columns that should be excluded from IS DISTINCT FROM comparisons
+# because their values are always different and shouldn't prevent updates/inserts
+METADATA_COLUMNS = {"_SDC_EXTRACTED_AT", "_SDC_BATCHED_AT", "_SDC_DELETED_AT"}
+
 
 def validate_config(config):
     errors = []
@@ -301,6 +305,9 @@ class DbSync:
         self.s3 = aws_session.client("s3")
         self.skip_updates = self.connection_config.get("skip_updates", False)
         self.full_refresh = self.connection_config.get("full_refresh", False)
+        self.skip_unchanged_rows = self.connection_config.get(
+            "skip_unchanged_rows", True
+        )
 
         self.schema_name = None
         self.grantees = None
@@ -597,7 +604,7 @@ class DbSync:
                     if len(stream_schema_message["key_properties"]) > 0:
                         # Step 5/b/1: Update existing records
                         if not self.skip_updates:
-                            update_sql = """UPDATE {}
+                            update_sql = """UPDATE {} t
                                 SET {}
                                 FROM {} s
                                 WHERE {}
@@ -610,7 +617,7 @@ class DbSync:
                                     ]
                                 ),
                                 stage_table,
-                                self.primary_key_merge_condition(),
+                                self.build_update_where_clause(columns_with_trans),
                             )
                             self.logger.debug("Running query: {}".format(update_sql))
                             cur.execute(update_sql)
@@ -619,7 +626,7 @@ class DbSync:
                         # Step 5/b/2: Insert new records
                         insert_sql = """INSERT INTO {} ({})
                             SELECT {}
-                            FROM {} s LEFT JOIN {}
+                            FROM {} s LEFT JOIN {} t
                             ON {}
                             WHERE {}
                         """.format(
@@ -633,7 +640,7 @@ class DbSync:
                             self.primary_key_merge_condition(),
                             " AND ".join(
                                 [
-                                    "{}.{} IS NULL".format(target_table, c)
+                                    "t.{} IS NULL".format(c)
                                     for c in primary_column_names(stream_schema_message)
                                 ]
                             ),
@@ -676,16 +683,94 @@ class DbSync:
                 )
 
     def primary_key_merge_condition(self):
+        """
+        Build primary key equality condition for joining target and stage tables.
+
+        Uses "t" as the target table alias (consistent with UPDATE statements).
+
+        Returns:
+            String like: "t.id = s.id AND t.name = s.name"
+        """
         stream_schema_message = self.stream_schema_message
-        names = primary_column_names(stream_schema_message)
         return " AND ".join(
             [
-                "{}.{} = s.{}".format(
-                    self.table_name(stream_schema_message["stream"], False), c, c
-                )
-                for c in names
+                "t.{} = s.{}".format(c, c)
+                for c in primary_column_names(stream_schema_message)
             ]
         )
+
+    def filter_non_metadata_columns(self, columns_with_trans):
+        """
+        Filter out metadata columns from the columns list.
+
+        Metadata columns are excluded because their values are always different
+        and shouldn't prevent updates/inserts.
+
+        Args:
+            columns_with_trans: List of column definitions with name and trans
+
+        Returns:
+            Filtered list of columns excluding metadata columns
+        """
+        return [
+            c for c in columns_with_trans
+            if c["name"].strip('"').upper() not in METADATA_COLUMNS
+        ]
+
+    def _build_distinct_from_condition(self, columns_with_trans):
+        """
+        Build a condition that checks if any column value is different between
+        target and stage tables using IS DISTINCT FROM operator.
+
+        This avoids updating rows where all values are identical, which would
+        still perform DELETE+INSERT under the hood in Redshift.
+
+        Metadata columns (_SDC_EXTRACTED_AT, _SDC_BATCHED_AT, _SDC_DELETED_AT) are
+        excluded because their values are always different and shouldn't prevent updates.
+
+        Returns a string like: (t.col1 IS DISTINCT FROM s.col1 OR t.col2 IS DISTINCT FROM s.col2 OR ...)
+        """
+        filtered_columns = self.filter_non_metadata_columns(columns_with_trans)
+
+        conditions = [
+            "t.{} IS DISTINCT FROM s.{}".format(c["name"], c["name"])
+            for c in filtered_columns
+        ]
+        if conditions:
+            return "({})".format(" OR ".join(conditions))
+        return ""
+
+    def build_update_where_clause(self, columns_with_trans):
+        """
+        Build WHERE clause for UPDATE statements that includes:
+        1. Primary key matching condition (t.id = s.id)
+        2. Distinct from condition to avoid updating identical values
+
+        This method combines both conditions to optimize UPDATE operations
+        by skipping rows where all values are identical.
+
+        Args:
+            columns_with_trans: List of column definitions with name and trans
+
+        Returns:
+            String containing the WHERE clause conditions
+        """
+        # Build primary key condition with target table alias
+        primary_key_condition = self.primary_key_merge_condition()
+
+        # Build distinct from condition to avoid updating identical values
+        # Only if skip_unchanged_rows is enabled
+        where_clause = primary_key_condition
+        if self.skip_unchanged_rows:
+            distinct_from_condition = self._build_distinct_from_condition(
+                columns_with_trans
+            )
+            if distinct_from_condition:
+                where_clause = "{} AND {}".format(
+                    primary_key_condition, distinct_from_condition
+                )
+
+        return where_clause
 
     def column_names(self):
         return [safe_column_name(name) for name in self.flatten_schema]

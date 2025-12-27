@@ -10,7 +10,12 @@ import re
 from typing import Dict, List, Tuple, Any
 import psycopg2.extras
 
-from target_redshift.db_sync import safe_column_name, column_trans, primary_column_names
+from target_redshift.db_sync import (
+    safe_column_name,
+    column_trans,
+    primary_column_names,
+    METADATA_COLUMNS,
+)
 
 
 class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instance-attributes
@@ -36,6 +41,10 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
         self.cleanup_s3_files = self.connection_config.get("cleanup_s3_files", True)
         self.stream_schema_message = db_sync.stream_schema_message
         self.flatten_schema = db_sync.flatten_schema
+
+    def _has_key_properties(self) -> bool:
+        """Check if the stream schema has primary key properties defined."""
+        return len(self.stream_schema_message["key_properties"]) > 0
 
     @staticmethod
     def _escape_sql_string(value: str) -> str:
@@ -159,10 +168,10 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
         set_clause = ", ".join(
             f"{c['name']} = s.{c['name']}" for c in columns_with_trans
         )
-        update_sql = f"""UPDATE {target_table}
+        update_sql = f"""UPDATE {target_table} t
             SET {set_clause}
             FROM {stage_table} s
-            WHERE {self.db_sync.primary_key_merge_condition()}
+            WHERE {self.db_sync.build_update_where_clause(columns_with_trans)}
         """
         self.logger.debug("Running query: %s", update_sql)
         cur.execute(update_sql)
@@ -174,22 +183,21 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
         target_table: str,
         stage_table: str,
         columns_with_trans: List[Dict[str, str]],
-        stream_schema_message: Dict[str, Any],
     ) -> int:
         """
         Insert new records from stage table to target table
         """
         self.logger.info("Inserting new records")
         primary_key_conditions = " AND ".join(
-            f"{target_table}.{c} IS NULL"
-            for c in primary_column_names(stream_schema_message)
+            f"t.{c} IS NULL"
+            for c in primary_column_names(self.stream_schema_message)
         )
 
         column_names = ", ".join(c["name"] for c in columns_with_trans)
         column_values = ", ".join(f"s.{c['name']}" for c in columns_with_trans)
         insert_sql = f"""INSERT INTO {target_table} ({column_names})
             SELECT {column_values}
-            FROM {stage_table} s LEFT JOIN {target_table}
+            FROM {stage_table} s LEFT JOIN {target_table} t
             ON {self.db_sync.primary_key_merge_condition()}
             WHERE {primary_key_conditions}
         """
@@ -216,7 +224,7 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
 
         self.logger.info("Detecting deleted records")
         deleted_at_col = safe_column_name("_SDC_DELETED_AT")
-        deletion_sql = f"""UPDATE {target_table}
+        deletion_sql = f"""UPDATE {target_table} t
             SET {deleted_at_col} = CURRENT_TIMESTAMP
             WHERE {deleted_at_col} IS NULL
             AND NOT EXISTS (
@@ -233,6 +241,66 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
             )
         return deletions
 
+    def _build_distinct_from_conditions_for_insert(
+        self, columns_with_trans: List[Dict[str, str]]
+    ) -> str:
+        """
+        Build conditions to check if all non-metadata columns are identical.
+
+        Uses "t" as the target table alias (consistent with NOT EXISTS subquery).
+        Excludes metadata columns because their values are always different
+        and shouldn't prevent inserts.
+        """
+        filtered_columns = self.db_sync.filter_non_metadata_columns(columns_with_trans)
+
+        return " AND ".join(
+            [
+                f"NOT (t.{c['name']} IS DISTINCT FROM s.{c['name']})"
+                for c in filtered_columns
+            ]
+        )
+
+    def _build_insert_sql_with_primary_keys(
+        self,
+        target_table: str,
+        stage_table: str,
+        column_names: str,
+        column_values: str,
+        columns_with_trans: List[Dict[str, str]],
+    ) -> str:
+        """Build INSERT SQL with NOT EXISTS to avoid inserting duplicate records."""
+        conditions = [self.db_sync.primary_key_merge_condition()]
+
+        # Only add distinct_from_conditions if skip_unchanged_rows is enabled
+        if self.db_sync.skip_unchanged_rows:
+            distinct_from_conditions = self._build_distinct_from_conditions_for_insert(
+                columns_with_trans
+            )
+            conditions.append(distinct_from_conditions)
+
+        where_clause = " AND ".join(conditions)
+
+        return f"""INSERT INTO {target_table} ({column_names})
+            SELECT {column_values}
+            FROM {stage_table} s
+            WHERE NOT EXISTS (
+                SELECT 1 FROM {target_table} t
+                WHERE {where_clause}
+            )
+        """
+
+    def _build_insert_sql_without_primary_keys(
+        self,
+        target_table: str,
+        stage_table: str,
+        column_names: str,
+        column_values: str,
+    ) -> str:
+        return f"""INSERT INTO {target_table} ({column_names})
+            SELECT {column_values}
+            FROM {stage_table} s
+        """
+
     def _insert_all_records(
         self,
         cur: Any,
@@ -245,14 +313,22 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
 
         Uses INSERT INTO ... SELECT to copy all records. This works reliably
         inside transactions, unlike ALTER TABLE APPEND which has transaction limitations.
+
+        When primary keys exist, skips inserting records that already exist with identical values.
         """
         self.logger.info("Inserting all records to the target table")
         column_names = ", ".join(c["name"] for c in columns_with_trans)
         column_values = ", ".join(f"s.{c['name']}" for c in columns_with_trans)
-        insert_sql = f"""INSERT INTO {target_table} ({column_names})
-            SELECT {column_values}
-            FROM {stage_table} s
-        """
+
+        if self._has_key_properties():
+            insert_sql = self._build_insert_sql_with_primary_keys(
+                target_table, stage_table, column_names, column_values, columns_with_trans
+            )
+        else:
+            insert_sql = self._build_insert_sql_without_primary_keys(
+                target_table, stage_table, column_names, column_values
+            )
+
         self.logger.debug("Running query: %s", insert_sql)
         cur.execute(insert_sql)
         return cur.rowcount
@@ -260,7 +336,6 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
     def _merge_data(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         cur: Any,
-        stream_schema_message: Dict[str, Any],
         target_table: str,
         stage_table: str,
         columns_with_trans: List[Dict[str, str]],
@@ -272,7 +347,6 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
 
         Args:
             cur: Database cursor
-            stream_schema_message: Stream schema message
             target_table: Target table name (already sanitized)
             stage_table: Stage table name (already sanitized)
             columns_with_trans: List of column definitions
@@ -284,14 +358,13 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
         inserts = 0
         updates = 0
         deletions = 0
-        has_key_properties = len(stream_schema_message["key_properties"]) > 0
 
         if self.full_refresh:
             self._perform_full_refresh(
-                cur, stream_schema_message["stream"], target_table, stage_table
+                cur, self.stream_schema_message["stream"], target_table, stage_table
             )
             inserts = rows_uploaded
-        elif self.append_only or not has_key_properties:
+        elif self.append_only or not self._has_key_properties():
             # Append the whole stage table to the target one.
             inserts = self._insert_all_records(
                 cur, target_table, stage_table, columns_with_trans
@@ -306,13 +379,12 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
                 target_table,
                 stage_table,
                 columns_with_trans,
-                stream_schema_message,
             )
 
         if (
             self.detect_deletions
             and replication_method == "FULL_TABLE"
-            and has_key_properties
+            and self._has_key_properties()
             and not self.full_refresh
         ):
             # Delete detection works only if there is full data and table has primary key(s).
@@ -379,8 +451,7 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
             files_uploaded: Number of files uploaded (for handling multiple files)
             replication_method: Replication method from the message (e.g., 'FULL_TABLE', 'INCREMENTAL', 'LOG_BASED')
         """
-        stream_schema_message = self.stream_schema_message
-        stream = stream_schema_message["stream"]
+        stream = self.stream_schema_message["stream"]
         stage_table = self.db_sync.table_name(stream, is_stage=True)
         target_table = self.db_sync.table_name(stream, is_stage=False)
 
@@ -418,7 +489,6 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
                 # Merge data into target table
                 inserts, updates, deletions = self._merge_data(
                     cur,
-                    stream_schema_message,
                     target_table,
                     stage_table,
                     columns_with_trans,

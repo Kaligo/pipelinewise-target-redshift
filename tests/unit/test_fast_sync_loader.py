@@ -223,6 +223,13 @@ class TestFastSyncLoader:
         assert len(update_calls) > 0, "UPDATE query should be executed"
         assert len(insert_calls) > 0, "INSERT query should be executed"
 
+        # Verify UPDATE query includes IS DISTINCT FROM condition
+        update_sql = " ".join(update_calls)
+        assert "IS DISTINCT FROM" in update_sql, (
+            "UPDATE query should include IS DISTINCT FROM condition to avoid updating identical values"
+        )
+        assert "t." in update_sql, "UPDATE query should alias target table as 't'"
+
     @patch("target_redshift.db_sync.boto3")
     @patch("target_redshift.db_sync.psycopg2.connect")
     def test_fast_sync_full_refresh(self, mock_connect, mock_boto3):
@@ -522,4 +529,128 @@ class TestFastSyncLoader:
         deletion_calls = self._get_deletion_detection_calls(mock_cursor)
         assert len(deletion_calls) == 0, (
             "Deletion detection should NOT be executed without primary keys"
+        )
+
+    @patch("target_redshift.db_sync.boto3")
+    @patch("target_redshift.db_sync.psycopg2.connect")
+    def test_fast_sync_insert_all_records_with_primary_key(self, mock_connect, mock_boto3):
+        """Test that _insert_all_records uses NOT EXISTS to avoid duplicates when primary keys exist"""
+        config_append = self.config.copy()
+        config_append["append_only"] = True
+
+        loader, mock_cursor, _ = self._create_loader(
+            config=config_append, mock_connect=mock_connect, mock_boto3=mock_boto3
+        )
+
+        loader.load_from_s3(
+            s3_bucket="source-bucket",
+            s3_path="test/path/data.csv",
+            s3_region="us-east-1",
+            rows_uploaded=100,
+            files_uploaded=1,
+        )
+
+        # Verify INSERT INTO ... SELECT was executed
+        all_calls = self._get_sql_strings(mock_cursor)
+        insert_calls = [
+            call_str
+            for call_str in all_calls
+            if "INSERT INTO" in call_str and "SELECT" in call_str and "NOT EXISTS" in call_str
+        ]
+
+        assert len(insert_calls) > 0, (
+            "INSERT INTO ... SELECT with NOT EXISTS should be executed for append_only with primary keys"
+        )
+
+        # Verify INSERT query includes IS DISTINCT FROM condition
+        insert_sql = " ".join(insert_calls)
+        assert "IS DISTINCT FROM" in insert_sql, (
+            "INSERT query should include IS DISTINCT FROM condition to avoid inserting identical values"
+        )
+        assert "NOT EXISTS" in insert_sql, "INSERT query should use NOT EXISTS when primary keys exist"
+        assert "LEFT JOIN" not in insert_sql, "INSERT query should NOT use LEFT JOIN to avoid duplicates"
+
+    @patch("target_redshift.db_sync.boto3")
+    @patch("target_redshift.db_sync.psycopg2.connect")
+    def test_fast_sync_insert_all_records_with_primary_key_skip_unchanged_rows_false(
+        self, mock_connect, mock_boto3
+    ):
+        """Test that _insert_all_records doesn't use IS DISTINCT FROM when skip_unchanged_rows is False"""
+        config_append = self.config.copy()
+        config_append["append_only"] = True
+        config_append["skip_unchanged_rows"] = False
+
+        loader, mock_cursor, _ = self._create_loader(
+            config=config_append, mock_connect=mock_connect, mock_boto3=mock_boto3
+        )
+
+        loader.load_from_s3(
+            s3_bucket="source-bucket",
+            s3_path="test/path/data.csv",
+            s3_region="us-east-1",
+            rows_uploaded=100,
+            files_uploaded=1,
+        )
+
+        # Verify INSERT INTO ... SELECT was executed
+        all_calls = self._get_sql_strings(mock_cursor)
+        insert_calls = [
+            call_str
+            for call_str in all_calls
+            if "INSERT INTO" in call_str and "SELECT" in call_str and "NOT EXISTS" in call_str
+        ]
+
+        assert len(insert_calls) > 0, (
+            "INSERT INTO ... SELECT with NOT EXISTS should be executed for append_only with primary keys"
+        )
+
+        # Verify INSERT query does NOT include IS DISTINCT FROM condition when disabled
+        insert_sql = " ".join(insert_calls)
+        assert "IS DISTINCT FROM" not in insert_sql, (
+            "INSERT query should NOT include IS DISTINCT FROM condition when skip_unchanged_rows is False"
+        )
+        assert "NOT EXISTS" in insert_sql, "INSERT query should still use NOT EXISTS when primary keys exist"
+
+    @patch("target_redshift.db_sync.boto3")
+    @patch("target_redshift.db_sync.psycopg2.connect")
+    def test_fast_sync_insert_all_records_no_primary_key(self, mock_connect, mock_boto3):
+        """Test that _insert_all_records does not include LEFT JOIN when no primary keys exist"""
+        schema_no_pk = self.stream_schema_message.copy()
+        schema_no_pk["key_properties"] = []
+
+        config_append = self.config.copy()
+        config_append["append_only"] = True
+
+        loader, mock_cursor, _ = self._create_loader(
+            config=config_append,
+            schema=schema_no_pk,
+            mock_connect=mock_connect,
+            mock_boto3=mock_boto3,
+        )
+
+        loader.load_from_s3(
+            s3_bucket="source-bucket",
+            s3_path="test/path/data.csv",
+            s3_region="us-east-1",
+            rows_uploaded=100,
+            files_uploaded=1,
+        )
+
+        # Verify INSERT INTO ... SELECT was executed without LEFT JOIN
+        all_calls = self._get_sql_strings(mock_cursor)
+        insert_calls = [
+            call_str
+            for call_str in all_calls
+            if "INSERT INTO" in call_str and "SELECT" in call_str
+        ]
+
+        assert len(insert_calls) > 0, "INSERT INTO ... SELECT should be executed"
+
+        # Verify INSERT query does NOT include LEFT JOIN when no primary keys
+        insert_sql = " ".join(insert_calls)
+        assert "LEFT JOIN" not in insert_sql, (
+            "INSERT query should NOT include LEFT JOIN when no primary keys exist"
+        )
+        assert "IS DISTINCT FROM" not in insert_sql, (
+            "INSERT query should NOT include IS DISTINCT FROM when no primary keys exist"
         )

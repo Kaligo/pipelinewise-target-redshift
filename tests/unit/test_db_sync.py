@@ -1,4 +1,3 @@
-import pytest
 import target_redshift
 
 
@@ -72,7 +71,7 @@ class TestTargetRedshift(object):
         json_bool =         {"type": ["boolean"]            }
         json_obj =          {"type": ["object"]             }
         json_arr =          {"type": ["array"]              }
-        
+
         # Mapping from JSON schema types ot Redshift column types
         assert mapper(json_str)          == 'character varying(10000)'
         assert mapper(json_str_or_null)  == 'character varying(10000)'
@@ -322,3 +321,349 @@ class TestTargetRedshift(object):
         for idx, (should_use_flatten_schema, record, expected_output) in enumerate(test_cases):
             output = flatten_record(record, flatten_schema if should_use_flatten_schema else None)
             assert output == expected_output
+
+    def test_build_distinct_from_condition(self):
+        """Test building IS DISTINCT FROM condition for avoiding identical updates"""
+        config = {
+            'host': "dummy-value",
+            'port': 5439,
+            'user': "dummy-value",
+            'password': "dummy-value",
+            'dbname': "dummy-value",
+            'aws_access_key_id': "dummy-value",
+            'aws_secret_access_key': "dummy-value",
+            's3_bucket': "dummy-value",
+            'default_target_schema': "dummy-value"
+        }
+
+        stream_schema_message = {
+            "stream": "test_schema-test_table",
+            "schema": {
+                "properties": {
+                    "id": {"type": ["null", "integer"]},
+                    "name": {"type": ["null", "string"]},
+                    "value": {"type": ["null", "number"]},
+                }
+            },
+            "key_properties": ["id"],
+        }
+
+        db = target_redshift.db_sync.DbSync(config, stream_schema_message)
+
+        columns_with_trans = [
+            {"name": '"ID"', "trans": ""},
+            {"name": '"NAME"', "trans": ""},
+            {"name": '"VALUE"', "trans": ""},
+        ]
+
+        result = db._build_distinct_from_condition(columns_with_trans)
+
+        # Should contain IS DISTINCT FROM conditions for all columns
+        assert "IS DISTINCT FROM" in result
+        assert '"ID"' in result
+        assert '"NAME"' in result
+        assert '"VALUE"' in result
+        assert result.startswith("(")
+        assert result.endswith(")")
+
+        # Test with empty columns
+        empty_result = db._build_distinct_from_condition([])
+        assert empty_result == ""
+
+    def test_build_update_where_clause(self):
+        """Test building WHERE clause for UPDATE statements with distinct from condition"""
+        config = {
+            'host': "dummy-value",
+            'port': 5439,
+            'user': "dummy-value",
+            'password': "dummy-value",
+            'dbname': "dummy-value",
+            'aws_access_key_id': "dummy-value",
+            'aws_secret_access_key': "dummy-value",
+            's3_bucket': "dummy-value",
+            'default_target_schema': "dummy-value"
+        }
+
+        stream_schema_message = {
+            "stream": "test_schema-test_table",
+            "schema": {
+                "properties": {
+                    "id": {"type": ["null", "integer"]},
+                    "name": {"type": ["null", "string"]},
+                    "value": {"type": ["null", "number"]},
+                }
+            },
+            "key_properties": ["id"],
+        }
+
+        db = target_redshift.db_sync.DbSync(config, stream_schema_message)
+
+        columns_with_trans = [
+            {"name": '"ID"', "trans": ""},
+            {"name": '"NAME"', "trans": ""},
+            {"name": '"VALUE"', "trans": ""},
+        ]
+
+        result = db.build_update_where_clause(columns_with_trans)
+
+        # Should contain primary key condition
+        assert "t.\"ID\" = s.\"ID\"" in result
+
+        # Should contain IS DISTINCT FROM condition
+        assert "IS DISTINCT FROM" in result
+
+        # Should combine with AND
+        assert " AND " in result
+
+    def test_build_distinct_from_condition_excludes_metadata_columns(self):
+        """Test that _build_distinct_from_condition excludes metadata columns"""
+        config = {
+            'host': "dummy-value",
+            'port': 5439,
+            'user': "dummy-value",
+            'password': "dummy-value",
+            'dbname': "dummy-value",
+            'aws_access_key_id': "dummy-value",
+            'aws_secret_access_key': "dummy-value",
+            's3_bucket': "dummy-value",
+            'default_target_schema': "dummy-value"
+        }
+
+        stream_schema_message = {
+            "stream": "test_schema-test_table",
+            "schema": {
+                "properties": {
+                    "id": {"type": ["null", "integer"]},
+                    "name": {"type": ["null", "string"]},
+                    "_SDC_EXTRACTED_AT": {"type": ["null", "string"]},
+                    "_SDC_BATCHED_AT": {"type": ["null", "string"]},
+                    "_SDC_DELETED_AT": {"type": ["null", "string"]},
+                }
+            },
+            "key_properties": ["id"],
+        }
+
+        db = target_redshift.db_sync.DbSync(config, stream_schema_message)
+
+        columns_with_trans = [
+            {"name": '"ID"', "trans": ""},
+            {"name": '"NAME"', "trans": ""},
+            {"name": '"_SDC_EXTRACTED_AT"', "trans": ""},
+            {"name": '"_SDC_BATCHED_AT"', "trans": ""},
+            {"name": '"_SDC_DELETED_AT"', "trans": ""},
+        ]
+
+        result = db._build_distinct_from_condition(columns_with_trans)
+
+        # Should contain IS DISTINCT FROM for non-metadata columns
+        assert "IS DISTINCT FROM" in result
+        assert '"ID"' in result
+        assert '"NAME"' in result
+
+        # Should NOT contain metadata columns
+        assert "_SDC_EXTRACTED_AT" not in result
+        assert "_SDC_BATCHED_AT" not in result
+        assert "_SDC_DELETED_AT" not in result
+
+    def test_filter_non_metadata_columns(self):
+        """Test filtering out metadata columns from columns list"""
+        config = {
+            'host': "dummy-value",
+            'port': 5439,
+            'user': "dummy-value",
+            'password': "dummy-value",
+            'dbname': "dummy-value",
+            'aws_access_key_id': "dummy-value",
+            'aws_secret_access_key': "dummy-value",
+            's3_bucket': "dummy-value",
+            'default_target_schema': "dummy-value"
+        }
+
+        stream_schema_message = {
+            "stream": "test_schema-test_table",
+            "schema": {
+                "properties": {
+                    "id": {"type": ["null", "integer"]},
+                    "name": {"type": ["null", "string"]},
+                    "_SDC_EXTRACTED_AT": {"type": ["null", "string"]},
+                    "_SDC_BATCHED_AT": {"type": ["null", "string"]},
+                    "_SDC_DELETED_AT": {"type": ["null", "string"]},
+                }
+            },
+            "key_properties": ["id"],
+        }
+
+        db = target_redshift.db_sync.DbSync(config, stream_schema_message)
+
+        columns_with_trans = [
+            {"name": '"ID"', "trans": ""},
+            {"name": '"NAME"', "trans": ""},
+            {"name": '"_SDC_EXTRACTED_AT"', "trans": ""},
+            {"name": '"_SDC_BATCHED_AT"', "trans": ""},
+            {"name": '"_SDC_DELETED_AT"', "trans": ""},
+        ]
+
+        result = db.filter_non_metadata_columns(columns_with_trans)
+
+        # Should contain non-metadata columns
+        assert len(result) == 2
+        assert {"name": '"ID"', "trans": ""} in result
+        assert {"name": '"NAME"', "trans": ""} in result
+
+        # Should NOT contain metadata columns
+        assert {"name": '"_SDC_EXTRACTED_AT"', "trans": ""} not in result
+        assert {"name": '"_SDC_BATCHED_AT"', "trans": ""} not in result
+        assert {"name": '"_SDC_DELETED_AT"', "trans": ""} not in result
+
+        # Test with all metadata columns
+        only_metadata = [
+            {"name": '"_SDC_EXTRACTED_AT"', "trans": ""},
+            {"name": '"_SDC_BATCHED_AT"', "trans": ""},
+            {"name": '"_SDC_DELETED_AT"', "trans": ""},
+        ]
+        result_empty = db.filter_non_metadata_columns(only_metadata)
+        assert len(result_empty) == 0
+
+        # Test with no metadata columns
+        no_metadata = [
+            {"name": '"ID"', "trans": ""},
+            {"name": '"NAME"', "trans": ""},
+        ]
+        result_all = db.filter_non_metadata_columns(no_metadata)
+        assert len(result_all) == 2
+        assert result_all == no_metadata
+
+    def test_skip_unchanged_rows_default_true(self):
+        """Test that skip_unchanged_rows defaults to True"""
+        config = {
+            'host': "dummy-value",
+            'port': 5439,
+            'user': "dummy-value",
+            'password': "dummy-value",
+            'dbname': "dummy-value",
+            'aws_access_key_id': "dummy-value",
+            'aws_secret_access_key': "dummy-value",
+            's3_bucket': "dummy-value",
+            'default_target_schema': "dummy-value"
+        }
+
+        stream_schema_message = {
+            "stream": "test_schema-test_table",
+            "schema": {
+                "properties": {
+                    "id": {"type": ["null", "integer"]},
+                    "name": {"type": ["null", "string"]},
+                }
+            },
+            "key_properties": ["id"],
+        }
+
+        db = target_redshift.db_sync.DbSync(config, stream_schema_message)
+        assert db.skip_unchanged_rows is True
+
+    def test_skip_unchanged_rows_config_false(self):
+        """Test that skip_unchanged_rows can be set to False"""
+        config = {
+            'host': "dummy-value",
+            'port': 5439,
+            'user': "dummy-value",
+            'password': "dummy-value",
+            'dbname': "dummy-value",
+            'aws_access_key_id': "dummy-value",
+            'aws_secret_access_key': "dummy-value",
+            's3_bucket': "dummy-value",
+            'default_target_schema': "dummy-value",
+            'skip_unchanged_rows': False
+        }
+
+        stream_schema_message = {
+            "stream": "test_schema-test_table",
+            "schema": {
+                "properties": {
+                    "id": {"type": ["null", "integer"]},
+                    "name": {"type": ["null", "string"]},
+                }
+            },
+            "key_properties": ["id"],
+        }
+
+        db = target_redshift.db_sync.DbSync(config, stream_schema_message)
+        assert db.skip_unchanged_rows is False
+
+    def test_build_update_where_clause_with_skip_unchanged_rows_true(self):
+        """Test that build_update_where_clause includes distinct_from_condition when enabled"""
+        config = {
+            'host': "dummy-value",
+            'port': 5439,
+            'user': "dummy-value",
+            'password': "dummy-value",
+            'dbname': "dummy-value",
+            'aws_access_key_id': "dummy-value",
+            'aws_secret_access_key': "dummy-value",
+            's3_bucket': "dummy-value",
+            'default_target_schema': "dummy-value",
+            'skip_unchanged_rows': True
+        }
+
+        stream_schema_message = {
+            "stream": "test_schema-test_table",
+            "schema": {
+                "properties": {
+                    "id": {"type": ["null", "integer"]},
+                    "name": {"type": ["null", "string"]},
+                }
+            },
+            "key_properties": ["id"],
+        }
+
+        db = target_redshift.db_sync.DbSync(config, stream_schema_message)
+
+        columns_with_trans = [
+            {"name": '"ID"', "trans": ""},
+            {"name": '"NAME"', "trans": ""},
+        ]
+
+        result = db.build_update_where_clause(columns_with_trans)
+
+        # Should include both primary key condition and distinct_from condition
+        assert "t.\"ID\" = s.\"ID\"" in result
+        assert "IS DISTINCT FROM" in result
+
+    def test_build_update_where_clause_with_skip_unchanged_rows_false(self):
+        """Test that build_update_where_clause excludes distinct_from_condition when disabled"""
+        config = {
+            'host': "dummy-value",
+            'port': 5439,
+            'user': "dummy-value",
+            'password': "dummy-value",
+            'dbname': "dummy-value",
+            'aws_access_key_id': "dummy-value",
+            'aws_secret_access_key': "dummy-value",
+            's3_bucket': "dummy-value",
+            'default_target_schema': "dummy-value",
+            'skip_unchanged_rows': False
+        }
+
+        stream_schema_message = {
+            "stream": "test_schema-test_table",
+            "schema": {
+                "properties": {
+                    "id": {"type": ["null", "integer"]},
+                    "name": {"type": ["null", "string"]},
+                }
+            },
+            "key_properties": ["id"],
+        }
+
+        db = target_redshift.db_sync.DbSync(config, stream_schema_message)
+
+        columns_with_trans = [
+            {"name": '"ID"', "trans": ""},
+            {"name": '"NAME"', "trans": ""},
+        ]
+
+        result = db.build_update_where_clause(columns_with_trans)
+
+        # Should only include primary key condition, not distinct_from condition
+        assert "t.\"ID\" = s.\"ID\"" in result
+        assert "IS DISTINCT FROM" not in result
