@@ -30,6 +30,25 @@ LONG_VARCHAR_LENGTH = 65535
 METADATA_COLUMNS = {"_SDC_EXTRACTED_AT", "_SDC_BATCHED_AT", "_SDC_DELETED_AT"}
 
 
+def build_is_distinct_from_condition(left_expr: str, right_expr: str) -> str:
+    """
+    Build a Redshift-compatible condition that mimics IS DISTINCT FROM operator.
+
+    IS DISTINCT FROM is not officially supported by Redshift, so we use:
+    (a <> b) OR (a IS NULL) <> (b IS NULL)
+
+    This returns True if the values are different (including NULL handling).
+
+    Args:
+        left_expr: Left expression (e.g., "t.col1")
+        right_expr: Right expression (e.g., "s.col1")
+
+    Returns:
+        String like: "(t.col1 <> s.col1) OR ((t.col1 IS NULL) <> (s.col1 IS NULL))"
+    """
+    return f"({left_expr} <> {right_expr}) OR (({left_expr} IS NULL) <> ({right_expr} IS NULL))"
+
+
 def validate_config(config):
     errors = []
     required_config_keys = ["host", "port", "user", "password", "dbname", "s3_bucket"]
@@ -733,7 +752,7 @@ class DbSync:
         filtered_columns = self.filter_non_metadata_columns(columns_with_trans)
 
         conditions = [
-            "t.{} IS DISTINCT FROM s.{}".format(c["name"], c["name"])
+            build_is_distinct_from_condition(f"t.{c['name']}", f"s.{c['name']}")
             for c in filtered_columns
         ]
         if conditions:

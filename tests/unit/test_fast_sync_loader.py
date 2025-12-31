@@ -223,10 +223,13 @@ class TestFastSyncLoader:
         assert len(update_calls) > 0, "UPDATE query should be executed"
         assert len(insert_calls) > 0, "INSERT query should be executed"
 
-        # Verify UPDATE query includes IS DISTINCT FROM condition
+        # Verify UPDATE query includes Redshift-compatible distinct from condition
         update_sql = " ".join(update_calls)
-        assert "IS DISTINCT FROM" in update_sql, (
-            "UPDATE query should include IS DISTINCT FROM condition to avoid updating identical values"
+        assert "IS NULL" in update_sql, (
+            "UPDATE query should include Redshift-compatible distinct from condition (with NULL checks) to avoid updating identical values"
+        )
+        assert "<>" in update_sql, (
+            "UPDATE query should include comparison operators for distinct from condition"
         )
         assert "t." in update_sql, "UPDATE query should alias target table as 't'"
 
@@ -562,10 +565,13 @@ class TestFastSyncLoader:
             "INSERT INTO ... SELECT with NOT EXISTS should be executed for append_only with primary keys"
         )
 
-        # Verify INSERT query includes IS DISTINCT FROM condition
+        # Verify INSERT query includes Redshift-compatible distinct from condition
         insert_sql = " ".join(insert_calls)
-        assert "IS DISTINCT FROM" in insert_sql, (
-            "INSERT query should include IS DISTINCT FROM condition to avoid inserting identical values"
+        assert "IS NULL" in insert_sql, (
+            "INSERT query should include Redshift-compatible distinct from condition (with NULL checks) to avoid inserting identical values"
+        )
+        assert "<>" in insert_sql, (
+            "INSERT query should include comparison operators for distinct from condition"
         )
         assert "NOT EXISTS" in insert_sql, "INSERT query should use NOT EXISTS when primary keys exist"
         assert "LEFT JOIN" not in insert_sql, "INSERT query should NOT use LEFT JOIN to avoid duplicates"
@@ -651,6 +657,7 @@ class TestFastSyncLoader:
         assert "LEFT JOIN" not in insert_sql, (
             "INSERT query should NOT include LEFT JOIN when no primary keys exist"
         )
-        assert "IS DISTINCT FROM" not in insert_sql, (
-            "INSERT query should NOT include IS DISTINCT FROM when no primary keys exist"
+        # Should not have the distinct from pattern (<> with NULL checks)
+        assert not ("<>" in insert_sql and "IS NULL" in insert_sql and "NOT" in insert_sql), (
+            "INSERT query should NOT include distinct from condition when no primary keys exist"
         )

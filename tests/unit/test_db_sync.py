@@ -358,11 +358,11 @@ class TestTargetRedshift(object):
 
         result = db._build_distinct_from_condition(columns_with_trans)
 
-        # Should contain IS DISTINCT FROM conditions for all columns
-        assert "IS DISTINCT FROM" in result
-        assert '"ID"' in result
-        assert '"NAME"' in result
-        assert '"VALUE"' in result
+        # Should contain Redshift-compatible distinct from conditions for all columns
+        assert "t.\"ID\" <> s.\"ID\"" in result
+        assert "t.\"NAME\" <> s.\"NAME\"" in result
+        assert "t.\"VALUE\" <> s.\"VALUE\"" in result
+        assert "IS NULL" in result  # Should contain NULL checks
         assert result.startswith("(")
         assert result.endswith(")")
 
@@ -409,8 +409,9 @@ class TestTargetRedshift(object):
         # Should contain primary key condition
         assert "t.\"ID\" = s.\"ID\"" in result
 
-        # Should contain IS DISTINCT FROM condition
-        assert "IS DISTINCT FROM" in result
+        # Should contain Redshift-compatible distinct from condition
+        assert "t.\"ID\" <> s.\"ID\"" in result or "t.\"NAME\" <> s.\"NAME\"" in result
+        assert "IS NULL" in result  # Should contain NULL checks
 
         # Should combine with AND
         assert " AND " in result
@@ -455,10 +456,10 @@ class TestTargetRedshift(object):
 
         result = db._build_distinct_from_condition(columns_with_trans)
 
-        # Should contain IS DISTINCT FROM for non-metadata columns
-        assert "IS DISTINCT FROM" in result
-        assert '"ID"' in result
-        assert '"NAME"' in result
+        # Should contain Redshift-compatible distinct from for non-metadata columns
+        assert "t.\"ID\" <> s.\"ID\"" in result
+        assert "t.\"NAME\" <> s.\"NAME\"" in result
+        assert "IS NULL" in result  # Should contain NULL checks
 
         # Should NOT contain metadata columns
         assert "_SDC_EXTRACTED_AT" not in result
@@ -627,7 +628,8 @@ class TestTargetRedshift(object):
 
         # Should include both primary key condition and distinct_from condition
         assert "t.\"ID\" = s.\"ID\"" in result
-        assert "IS DISTINCT FROM" in result
+        assert "t.\"ID\" <> s.\"ID\"" in result or "t.\"NAME\" <> s.\"NAME\"" in result
+        assert "IS NULL" in result  # Should contain NULL checks
 
     def test_build_update_where_clause_with_skip_unchanged_rows_false(self):
         """Test that build_update_where_clause excludes distinct_from_condition when disabled"""

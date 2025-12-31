@@ -15,6 +15,7 @@ from target_redshift.db_sync import (
     column_trans,
     primary_column_names,
     METADATA_COLUMNS,
+    build_is_distinct_from_condition,
 )
 
 
@@ -255,7 +256,7 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
 
         return " AND ".join(
             [
-                f"NOT (t.{c['name']} IS DISTINCT FROM s.{c['name']})"
+                f"NOT ({build_is_distinct_from_condition('t.' + c['name'], 's.' + c['name'])})"
                 for c in filtered_columns
             ]
         )
