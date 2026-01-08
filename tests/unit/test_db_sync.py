@@ -1,5 +1,7 @@
-import pytest
+from unittest.mock import MagicMock, patch, call
+
 import target_redshift
+from target_redshift import db_sync
 
 
 class TestTargetRedshift(object):
@@ -72,7 +74,7 @@ class TestTargetRedshift(object):
         json_bool =         {"type": ["boolean"]            }
         json_obj =          {"type": ["object"]             }
         json_arr =          {"type": ["array"]              }
-        
+
         # Mapping from JSON schema types ot Redshift column types
         assert mapper(json_str)          == 'character varying(10000)'
         assert mapper(json_str_or_null)  == 'character varying(10000)'
@@ -322,3 +324,264 @@ class TestTargetRedshift(object):
         for idx, (should_use_flatten_schema, record, expected_output) in enumerate(test_cases):
             output = flatten_record(record, flatten_schema if should_use_flatten_schema else None)
             assert output == expected_output
+
+    def _create_test_config(self):
+        """Helper to create test configuration"""
+        return {
+            "host": "test-host",
+            "port": 5439,
+            "user": "test_user",
+            "password": "test_password",
+            "dbname": "test_db",
+            "aws_access_key_id": "test_key",
+            "aws_secret_access_key": "test_secret",
+            "s3_bucket": "test-bucket",
+            "default_target_schema": "test_schema",
+        }
+
+    def _create_mock_connection(self, mock_connect):
+        """Helper to create mock database connection"""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.rowcount = 0
+        mock_cursor.description = None
+
+        # Set up cursor as context manager
+        mock_cursor.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_cursor.__exit__ = MagicMock(return_value=False)
+
+        # Set up connection.cursor() to return cursor context manager
+        mock_cursor_context = MagicMock()
+        mock_cursor_context.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_cursor_context.__exit__ = MagicMock(return_value=False)
+        mock_conn.cursor.return_value = mock_cursor_context
+
+        # Set up connection as context manager
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=False)
+
+        mock_connect.return_value = mock_conn
+        return mock_cursor
+
+    def _setup_boto3_mock(self, mock_boto3):
+        """Helper to set up boto3 mock for DbSync initialization"""
+        mock_session = MagicMock()
+        mock_credentials = MagicMock()
+        mock_frozen_credentials = MagicMock()
+        mock_frozen_credentials.access_key = "test_key"
+        mock_frozen_credentials.secret_key = "test_secret"
+        mock_frozen_credentials.token = None
+        mock_credentials.get_frozen_credentials.return_value = mock_frozen_credentials
+        mock_session.get_credentials.return_value = mock_credentials
+        mock_s3_client = MagicMock()
+        mock_session.client.return_value = mock_s3_client
+        mock_boto3.session.Session.return_value = mock_session
+
+    @patch("target_redshift.db_sync.psycopg2.connect")
+    @patch("target_redshift.db_sync.boto3")
+    def test_alter_column_type(self, mock_boto3, mock_connect):
+        """Test alter_column_type method generates correct SQL"""
+        config = self._create_test_config()
+        stream_schema_message = {
+            "stream": "test_schema-test_table",
+            "schema": {
+                "properties": {
+                    "id": {"type": ["null", "integer"]},
+                }
+            },
+            "key_properties": ["id"],
+        }
+
+        self._setup_boto3_mock(mock_boto3)
+        mock_cursor = self._create_mock_connection(mock_connect)
+        db = db_sync.DbSync(config, stream_schema_message)
+
+        db.alter_column_type('"_SDC_DELETED_AT"', "timestamp without time zone", "test_schema-test_table")
+
+        expected_sql = 'ALTER TABLE "test_schema"."TEST_TABLE" ALTER COLUMN "_SDC_DELETED_AT" TYPE timestamp without time zone'
+        mock_cursor.execute.assert_called_once()
+        call_args = mock_cursor.execute.call_args[0][0]
+        assert call_args == expected_sql
+
+    @patch("target_redshift.db_sync.psycopg2.connect")
+    @patch("target_redshift.db_sync.boto3")
+    def test_update_columns_sdc_deleted_at_type_change(self, mock_boto3, mock_connect):
+        """Test that _sdc_deleted_at column type is altered directly when type changes"""
+        config = self._create_test_config()
+        stream_schema_message = {
+            "stream": "test_schema-test_table",
+            "schema": {
+                "properties": {
+                    "id": {"type": ["null", "integer"]},
+                    "_sdc_deleted_at": {
+                        "type": ["null", "string"],
+                        "format": "date-time",
+                    },
+                }
+            },
+            "key_properties": ["id"],
+        }
+
+        self._setup_boto3_mock(mock_boto3)
+        self._create_mock_connection(mock_connect)
+        table_cache = [
+            {
+                "table_schema": "test_schema",
+                "table_name": "test_table",
+                "column_name": "id",
+                "data_type": "numeric",
+            },
+            {
+                "table_schema": "test_schema",
+                "table_name": "test_table",
+                "column_name": "_sdc_deleted_at",
+                "data_type": "character varying",
+            },
+        ]
+
+        db = db_sync.DbSync(config, stream_schema_message, table_cache=table_cache)
+
+        with patch.object(db, "alter_column_type") as mock_alter, \
+             patch.object(db, "version_column") as mock_version:
+            db.update_columns()
+
+            mock_alter.assert_called_once_with(
+                '"_SDC_DELETED_AT"',
+                "timestamp without time zone",
+                "test_schema-test_table"
+            )
+            assert not mock_version.called
+
+    @patch("target_redshift.db_sync.psycopg2.connect")
+    @patch("target_redshift.db_sync.boto3")
+    def test_update_columns_sdc_deleted_at_no_type_change(self, mock_boto3, mock_connect):
+        """Test that _sdc_deleted_at is not altered when type is already correct"""
+        config = self._create_test_config()
+        stream_schema_message = {
+            "stream": "test_schema-test_table",
+            "schema": {
+                "properties": {
+                    "id": {"type": ["null", "integer"]},
+                    "_sdc_deleted_at": {
+                        "type": ["null", "string"],
+                        "format": "date-time",
+                    },
+                }
+            },
+            "key_properties": ["id"],
+        }
+
+        self._setup_boto3_mock(mock_boto3)
+        self._create_mock_connection(mock_connect)
+        table_cache = [
+            {
+                "table_schema": "test_schema",
+                "table_name": "test_table",
+                "column_name": "id",
+                "data_type": "numeric",
+            },
+            {
+                "table_schema": "test_schema",
+                "table_name": "test_table",
+                "column_name": "_sdc_deleted_at",
+                "data_type": "timestamp without time zone",
+            },
+        ]
+
+        db = db_sync.DbSync(config, stream_schema_message, table_cache=table_cache)
+
+        with patch.object(db, "alter_column_type") as mock_alter:
+            db.update_columns()
+            assert not mock_alter.called
+
+    @patch("target_redshift.db_sync.psycopg2.connect")
+    @patch("target_redshift.db_sync.boto3")
+    def test_update_columns_sdc_deleted_at_not_in_schema(self, mock_boto3, mock_connect):
+        """Test that _sdc_deleted_at is not processed when not in schema"""
+        config = self._create_test_config()
+        stream_schema_message = {
+            "stream": "test_schema-test_table",
+            "schema": {
+                "properties": {
+                    "id": {"type": ["null", "integer"]},
+                }
+            },
+            "key_properties": ["id"],
+        }
+
+        self._setup_boto3_mock(mock_boto3)
+        self._create_mock_connection(mock_connect)
+        table_cache = [
+            {
+                "table_schema": "test_schema",
+                "table_name": "test_table",
+                "column_name": "id",
+                "data_type": "numeric",
+            },
+            {
+                "table_schema": "test_schema",
+                "table_name": "test_table",
+                "column_name": "_sdc_deleted_at",
+                "data_type": "character varying",
+            },
+        ]
+
+        db = db_sync.DbSync(config, stream_schema_message, table_cache=table_cache)
+
+        with patch.object(db, "alter_column_type") as mock_alter:
+            db.update_columns()
+            assert not mock_alter.called
+
+    @patch("target_redshift.db_sync.psycopg2.connect")
+    @patch("target_redshift.db_sync.boto3")
+    def test_update_columns_sdc_deleted_at_excluded_from_versioning(self, mock_boto3, mock_connect):
+        """Test that _sdc_deleted_at is excluded from columns_to_replace after being altered"""
+        config = self._create_test_config()
+        stream_schema_message = {
+            "stream": "test_schema-test_table",
+            "schema": {
+                "properties": {
+                    "id": {"type": ["null", "integer"]},
+                    "name": {"type": ["null", "string"]},
+                    "_sdc_deleted_at": {
+                        "type": ["null", "string"],
+                        "format": "date-time",
+                    },
+                }
+            },
+            "key_properties": ["id"],
+        }
+
+        self._setup_boto3_mock(mock_boto3)
+        self._create_mock_connection(mock_connect)
+        table_cache = [
+            {
+                "table_schema": "test_schema",
+                "table_name": "test_table",
+                "column_name": "id",
+                "data_type": "numeric",
+            },
+            {
+                "table_schema": "test_schema",
+                "table_name": "test_table",
+                "column_name": "_sdc_deleted_at",
+                "data_type": "character varying",
+            },
+            {
+                "table_schema": "test_schema",
+                "table_name": "test_table",
+                "column_name": "name",
+                "data_type": "character varying(100)",
+            },
+        ]
+
+        db = db_sync.DbSync(config, stream_schema_message, table_cache=table_cache)
+
+        with patch.object(db, "alter_column_type") as mock_alter, \
+             patch.object(db, "version_column") as mock_version:
+            db.update_columns()
+
+            mock_alter.assert_called_once()
+            assert mock_alter.call_args[0][0] == '"_SDC_DELETED_AT"'
+            version_calls = [call[0][0] for call in mock_version.call_args_list]
+            assert '"_SDC_DELETED_AT"' not in version_calls

@@ -857,8 +857,12 @@ class DbSync:
         for column in columns_to_add:
             self.add_column(column, stream)
 
+        # Handle _sdc_deleted_at separately - alter type directly instead of versioning
+        # since it's always NULL and we don't want to create duplicate columns
+        self._handle_sdc_deleted_at_type_change(columns_dict, stream)
+
         columns_to_replace = [
-            (safe_column_name(name), column_clause(name, properties_schema))
+            (safe_column_name(name), column_clause(name, properties_schema), name.lower(), properties_schema)
             for (name, properties_schema) in self.flatten_schema.items()
             if name.lower() in columns_dict
             and columns_dict[name.lower()]["data_type"].lower()
@@ -867,9 +871,9 @@ class DbSync:
             # Don't alter table if 'timestamp without time zone' detected as the new required column type
             #
             # Target-redshift maps every data-time JSON types to 'timestamp without time zone' but sometimes
-            # a 'timestamp with time zone' column is alrady available in the target table
+            # a 'timestamp with time zone' column is already available in the target table
             # (i.e. created by fastsync initial load)
-            # We need to exclude this conversion otherwise we loose the data that is already populated
+            # We need to exclude this conversion otherwise we lose the data that is already populated
             # in the column
             #
             # TODO: Support both timestamp with/without time zone in target-redshift
@@ -878,13 +882,42 @@ class DbSync:
             column_type(properties_schema).lower() != "timestamp without time zone"
         ]
 
-        for column_name, column in columns_to_replace:
+        for column_name, column, column_name_lower, properties_schema in columns_to_replace:
             self.version_column(column_name, stream)
             self.add_column(column, stream)
 
         # Refresh table cache if required
-        if self.table_cache and (len(columns_to_add) > 0 or len(columns_to_replace)):
+        if self.table_cache and (len(columns_to_add) > 0 or len(columns_to_replace) > 0):
             self.table_cache = self.get_table_columns(filter_schemas=[self.schema_name])
+
+    def _handle_sdc_deleted_at_type_change(self, columns_dict, stream):
+        """Handle _sdc_deleted_at column type change by altering directly.
+
+        This method alters the _sdc_deleted_at column type directly instead of
+        versioning it, since the column is always NULL and we don't want to
+        create duplicate columns.
+
+        Args:
+            columns_dict: Dictionary of existing columns (modified in place)
+            stream: Stream name for the table
+        """
+        sdc_deleted_at_name = "_sdc_deleted_at"
+        if sdc_deleted_at_name not in self.flatten_schema:
+            return
+
+        if sdc_deleted_at_name not in columns_dict:
+            return
+
+        current_type = columns_dict[sdc_deleted_at_name]["data_type"].lower()
+        properties_schema = self.flatten_schema[sdc_deleted_at_name]
+        new_type = column_type(properties_schema, with_length=False).lower()
+
+        if current_type != new_type:
+            column_name = safe_column_name(sdc_deleted_at_name)
+            new_column_type = column_type(properties_schema)
+            self.alter_column_type(column_name, new_column_type, stream)
+            # Remove from columns_dict to avoid processing again in columns_to_replace
+            del columns_dict[sdc_deleted_at_name]
 
     def drop_column(self, column_name, stream):
         drop_column = "ALTER TABLE {} DROP COLUMN {}".format(
@@ -892,6 +925,17 @@ class DbSync:
         )
         self.logger.info("Dropping column: {}".format(drop_column))
         self.query(drop_column)
+
+    def alter_column_type(self, column_name, new_column_type, stream):
+        """Alter column type directly without versioning.
+
+        This is safe to use when the column is empty (all NULL values).
+        """
+        alter_sql = "ALTER TABLE {} ALTER COLUMN {} TYPE {}".format(
+            self.table_name(stream, is_stage=False), column_name, new_column_type
+        )
+        self.logger.info("Altering column type: {}".format(alter_sql))
+        self.query(alter_sql)
 
     def version_column(self, column_name, stream):
         version_column = 'ALTER TABLE {} RENAME COLUMN {} TO "{}_{}"'.format(
