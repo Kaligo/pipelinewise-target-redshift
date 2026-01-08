@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from target_redshift import db_sync
 import target_redshift.fast_sync.handler as fast_sync_handler
+from target_redshift.fast_sync.loader import FastSyncS3Info
 
 
 class TestFastSyncHandler:
@@ -177,14 +178,16 @@ class TestFastSyncHandler:
         fast_sync_handler.load_from_s3("test_stream", message, db)
 
         mock_loader_class.assert_called_once_with(db)
-        mock_loader.load_from_s3.assert_called_once_with(
-            s3_bucket="test-bucket",
-            s3_path="test/path/data.csv",
-            s3_region="us-east-1",
-            rows_uploaded=100,
-            files_uploaded=1,
-            replication_method="FULL_TABLE",
-        )
+        # Verify load_from_s3 was called with FastSyncS3Info
+        mock_loader.load_from_s3.assert_called_once()
+        call_args = mock_loader.load_from_s3.call_args[0][0]
+        assert isinstance(call_args, FastSyncS3Info)
+        assert call_args.s3_bucket == "test-bucket"
+        assert call_args.s3_path == "test/path/data.csv"
+        assert call_args.s3_region == "us-east-1"
+        assert call_args.rows_uploaded == 100
+        assert call_args.files_uploaded == 1
+        assert call_args.replication_method == "FULL_TABLE"
 
     @patch("target_redshift.fast_sync.handler.FastSyncLoader")
     def test_load_from_s3_error(self, mock_loader_class):
@@ -211,15 +214,16 @@ class TestFastSyncHandler:
 
         fast_sync_handler.load_from_s3("test_stream", message, db)
 
-        # Verify load_from_s3 was called with rows_uploaded defaulting to 0
-        mock_loader.load_from_s3.assert_called_once_with(
-            s3_bucket="test-bucket",
-            s3_path="test/path/data.csv",
-            s3_region="us-west-2",
-            rows_uploaded=0,  # Default value when not provided
-            files_uploaded=2,
-            replication_method="FULL_TABLE",
-        )
+        # Verify load_from_s3 was called with FastSyncS3Info
+        mock_loader.load_from_s3.assert_called_once()
+        call_args = mock_loader.load_from_s3.call_args[0][0]
+        assert isinstance(call_args, FastSyncS3Info)
+        assert call_args.s3_bucket == "test-bucket"
+        assert call_args.s3_path == "test/path/data.csv"
+        assert call_args.s3_region == "us-west-2"
+        assert call_args.rows_uploaded == 0  # Default value when not provided
+        assert call_args.files_uploaded == 2
+        assert call_args.replication_method == "FULL_TABLE"
 
     def test_flush_operations_empty_queue(self):
         """Test flush_operations with empty queue"""
