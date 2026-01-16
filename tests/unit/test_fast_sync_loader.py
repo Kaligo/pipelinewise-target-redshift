@@ -5,7 +5,7 @@ Unit tests for fast sync functionality in target-redshift
 from unittest.mock import MagicMock, patch
 
 from target_redshift import db_sync
-from target_redshift.fast_sync.loader import FastSyncLoader
+from target_redshift.fast_sync.loader import FastSyncLoader, FastSyncS3Info
 
 
 class TestFastSyncLoader:
@@ -112,6 +112,25 @@ class TestFastSyncLoader:
             and "NOT EXISTS" in call_str
         ]
 
+    def _create_s3_info(
+        self,
+        s3_bucket="source-bucket",
+        s3_path="test/path/data.csv",
+        s3_region="us-east-1",
+        rows_uploaded=100,
+        files_uploaded=1,
+        replication_method=None,
+    ) -> FastSyncS3Info:
+        """Helper to create FastSyncS3Info for tests"""
+        return FastSyncS3Info(
+            s3_bucket=s3_bucket,
+            s3_path=s3_path,
+            s3_region=s3_region,
+            files_uploaded=files_uploaded,
+            replication_method=replication_method or "FULL_TABLE",
+            rows_uploaded=rows_uploaded,
+        )
+
     @patch("target_redshift.db_sync.boto3")
     @patch("target_redshift.db_sync.psycopg2.connect")
     def test_fast_sync_load_from_s3_basic(self, mock_connect, mock_boto3):
@@ -120,13 +139,14 @@ class TestFastSyncLoader:
             mock_connect=mock_connect, mock_boto3=mock_boto3
         )
 
-        loader.load_from_s3(
+        s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
             s3_path="test/path/data.csv",
             s3_region="us-east-1",
             rows_uploaded=100,
             files_uploaded=1,
         )
+        loader.load_from_s3(s3_info)
 
         # Verify essential operations
         assert len(self._get_sql_calls(mock_cursor, "COPY")) > 0, (
@@ -151,13 +171,14 @@ class TestFastSyncLoader:
             mock_connect=mock_connect, mock_boto3=mock_boto3
         )
 
-        loader.load_from_s3(
+        s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
             s3_path="test/path/data.csv",
             s3_region="us-east-1",
             rows_uploaded=1000,
             files_uploaded=3,
         )
+        loader.load_from_s3(s3_info)
 
         # Verify S3 cleanup was attempted for multiple files
         assert mock_s3_client.delete_object.call_count >= 3, (
@@ -178,7 +199,7 @@ class TestFastSyncLoader:
             mock_boto3=mock_boto3,
         )
 
-        loader.load_from_s3(
+        s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
             s3_path="test/path/data.csv",
             s3_region="us-east-1",
@@ -186,6 +207,7 @@ class TestFastSyncLoader:
             files_uploaded=1,
             replication_method="FULL_TABLE",
         )
+        loader.load_from_s3(s3_info)
 
         # Verify deletion detection query was executed
         deletion_calls = self._get_deletion_detection_calls(mock_cursor)
@@ -199,13 +221,14 @@ class TestFastSyncLoader:
             mock_connect=mock_connect, mock_boto3=mock_boto3
         )
 
-        loader.load_from_s3(
+        s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
             s3_path="test/path/data.csv",
             s3_region="us-east-1",
             rows_uploaded=100,
             files_uploaded=1,
         )
+        loader.load_from_s3(s3_info)
 
         # Verify UPDATE and INSERT queries were executed
         all_calls = self._get_sql_strings(mock_cursor)
@@ -234,13 +257,14 @@ class TestFastSyncLoader:
             config=config_full_refresh, mock_connect=mock_connect, mock_boto3=mock_boto3
         )
 
-        loader.load_from_s3(
+        s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
             s3_path="test/path/data.csv",
             s3_region="us-east-1",
             rows_uploaded=100,
             files_uploaded=1,
         )
+        loader.load_from_s3(s3_info)
 
         # Verify table swap query was executed
         all_calls = self._get_sql_strings(mock_cursor)
@@ -272,13 +296,14 @@ class TestFastSyncLoader:
         )
 
         # Should not raise exception even if S3 cleanup fails
-        loader.load_from_s3(
+        s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
             s3_path="test/path/data.csv",
             s3_region="us-east-1",
             rows_uploaded=100,
             files_uploaded=1,
         )
+        loader.load_from_s3(s3_info)
 
         # Verify COPY command was still executed
         assert len(self._get_sql_calls(mock_cursor, "COPY")) > 0, (
@@ -296,13 +321,14 @@ class TestFastSyncLoader:
             config=config_no_cleanup, mock_connect=mock_connect, mock_boto3=mock_boto3
         )
 
-        loader.load_from_s3(
+        s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
             s3_path="test/path/data.csv",
             s3_region="us-east-1",
             rows_uploaded=100,
             files_uploaded=1,
         )
+        loader.load_from_s3(s3_info)
 
         assert len(self._get_sql_calls(mock_cursor, "COPY")) > 0, (
             "COPY command should be executed"
@@ -322,13 +348,14 @@ class TestFastSyncLoader:
             schema=schema_no_pk, mock_connect=mock_connect, mock_boto3=mock_boto3
         )
 
-        loader.load_from_s3(
+        s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
             s3_path="test/path/data.csv",
             s3_region="us-east-1",
             rows_uploaded=100,
             files_uploaded=1,
         )
+        loader.load_from_s3(s3_info)
 
         # Verify INSERT INTO ... SELECT was executed
         all_calls = self._get_sql_strings(mock_cursor)
@@ -370,13 +397,14 @@ class TestFastSyncLoader:
             config=config_no_region, mock_connect=mock_connect, mock_boto3=None
         )
 
-        loader.load_from_s3(
+        s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
             s3_path="test/path/data.csv",
             s3_region="ap-southeast-1",
             rows_uploaded=10,
             files_uploaded=1,
         )
+        loader.load_from_s3(s3_info)
 
         # Verify REGION was added to the COPY command
         copy_calls = self._get_sql_strings(mock_cursor)
@@ -402,13 +430,14 @@ class TestFastSyncLoader:
             config=config_with_region, mock_connect=mock_connect, mock_boto3=None
         )
 
-        loader.load_from_s3(
+        s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
             s3_path="test/path/data.csv",
             s3_region="us-east-1",  # Different region, but should be ignored
             rows_uploaded=10,
             files_uploaded=1,
         )
+        loader.load_from_s3(s3_info)
 
         # Verify existing REGION is preserved and not duplicated
         copy_calls = self._get_sql_strings(mock_cursor)
@@ -433,7 +462,7 @@ class TestFastSyncLoader:
             mock_boto3=mock_boto3,
         )
 
-        loader.load_from_s3(
+        s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
             s3_path="test/path/data.csv",
             s3_region="us-east-1",
@@ -441,6 +470,7 @@ class TestFastSyncLoader:
             files_uploaded=1,
             replication_method="INCREMENTAL",
         )
+        loader.load_from_s3(s3_info)
 
         # Verify deletion detection query was NOT executed
         deletion_calls = self._get_deletion_detection_calls(mock_cursor)
@@ -463,7 +493,7 @@ class TestFastSyncLoader:
             config=config_append, mock_connect=mock_connect, mock_boto3=mock_boto3
         )
 
-        loader.load_from_s3(
+        s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
             s3_path="test/path/data.csv",
             s3_region="us-east-1",
@@ -471,6 +501,7 @@ class TestFastSyncLoader:
             files_uploaded=1,
             replication_method="FULL_TABLE",
         )
+        loader.load_from_s3(s3_info)
 
         # Verify INSERT INTO ... SELECT was executed
         all_calls = self._get_sql_strings(mock_cursor)
@@ -509,7 +540,7 @@ class TestFastSyncLoader:
             mock_boto3=mock_boto3,
         )
 
-        loader.load_from_s3(
+        s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
             s3_path="test/path/data.csv",
             s3_region="us-east-1",
@@ -517,6 +548,7 @@ class TestFastSyncLoader:
             files_uploaded=1,
             replication_method="FULL_TABLE",
         )
+        loader.load_from_s3(s3_info)
 
         # Verify deletion detection is NOT executed (requires primary keys)
         deletion_calls = self._get_deletion_detection_calls(mock_cursor)

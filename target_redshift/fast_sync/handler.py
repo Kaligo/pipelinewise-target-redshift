@@ -7,7 +7,7 @@ This module handles fast_sync_s3_info embedded in STATE messages and processes t
 from typing import Dict, Any, Iterable
 from joblib import Parallel, delayed, parallel_backend
 from singer import get_logger
-from target_redshift.fast_sync.loader import FastSyncLoader
+from target_redshift.fast_sync.loader import FastSyncLoader, FastSyncS3Info
 
 LOGGER = get_logger("target_redshift")
 
@@ -109,32 +109,21 @@ def extract_operations_from_state(
 
 def load_from_s3(stream: str, message: Dict[str, Any], db_sync: Any) -> None:
     """Load data from S3 for a single stream (used for parallel processing)"""
-    s3_bucket = message["s3_bucket"]
-    s3_path = message["s3_path"]
-    s3_region = message["s3_region"]
-    files_uploaded = message["files_uploaded"]
-    replication_method = message["replication_method"]
-    rows_uploaded = message.get("rows_uploaded", 0)
-
     try:
+        s3_info = FastSyncS3Info.from_message(message)
         LOGGER.info(
             "Processing %s for stream %s: s3://%s/%s",
             FAST_SYNC_S3_INFO_KEY,
             stream,
-            s3_bucket,
-            s3_path,
+            s3_info.s3_bucket,
+            s3_info.s3_path,
         )
         loader = FastSyncLoader(db_sync)
-        loader.load_from_s3(
-            s3_bucket=s3_bucket,
-            s3_path=s3_path,
-            s3_region=s3_region,
-            rows_uploaded=rows_uploaded,
-            files_uploaded=files_uploaded,
-            replication_method=replication_method,
-        )
+        loader.load_from_s3(s3_info)
         LOGGER.info(
-            "Successfully loaded %s rows from S3 for stream %s", rows_uploaded, stream
+            "Successfully loaded %s rows from S3 for stream %s",
+            s3_info.rows_uploaded,
+            stream,
         )
     except Exception as exc:
         LOGGER.error("Failed to load data from S3 for stream %s: %s", stream, str(exc))
