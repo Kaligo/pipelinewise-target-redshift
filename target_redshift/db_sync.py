@@ -20,6 +20,8 @@ import psycopg2.extras
 import inflection
 from singer import get_logger
 
+from target_redshift.metrics import MetricsClient
+
 
 DEFAULT_VARCHAR_LENGTH = 10000
 SHORT_VARCHAR_LENGTH = 256
@@ -380,6 +382,7 @@ class DbSync:
                 stream_schema_message["schema"],
                 max_level=self.data_flattening_max_level,
             )
+            self.metrics = MetricsClient(self.connection_config)
 
     def open_connection(self):
         conn_string = "host='{}' dbname='{}' user='{}' password='{}' port='{}'".format(
@@ -673,6 +676,27 @@ class DbSync:
                             }
                         ),
                     )
+                )
+                self.metrics.gauge(
+                    "sync.inserts",
+                    inserts,
+                    tags={
+                        "stream": stream,
+                    }
+                )
+                self.metrics.gauge(
+                    "sync.updates",
+                    updates,
+                    tags={
+                        "stream": stream,
+                    }
+                )
+                self.metrics.gauge(
+                    "sync.size_bytes",
+                    size_bytes,
+                    tags={
+                        "stream": stream,
+                    }
                 )
 
     def primary_key_merge_condition(self):
