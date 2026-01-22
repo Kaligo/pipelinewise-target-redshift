@@ -8,7 +8,7 @@ class MetricsClient:
         self.statsd_host = config.get("metrics", {}).get("statsd_host")
         self.statsd_port = config.get("metrics", {}).get("statsd_port")
         self.statsd_prefix = "replication"
-        self.statsd_namespace = config.get("metrics", {}).get("namespace")
+        self.statsd_namespace = config.get("metrics", {}).get("statsd_namespace")
         self.statsd_enabled = config.get("metrics", {}).get("statsd_enabled", False)
         self.statsd_client = None
 
