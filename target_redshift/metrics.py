@@ -10,7 +10,6 @@ class MetricsClient:
         self.statsd_prefix = "replication"
         self.statsd_namespace = config.get("metrics", {}).get("namespace")
         self.statsd_enabled = config.get("metrics", {}).get("statsd_enabled", False)
-        self.ipv6 = config.get("metrics", {}).get("statsd_ipv6", False)
         self.statsd_client = None
 
     def _get_statsd_client(self):
