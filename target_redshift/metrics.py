@@ -1,4 +1,4 @@
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from statsd import StatsClient
 
@@ -21,6 +21,6 @@ class MetricsClient:
             )
         return self.statsd_client
 
-    def gauge(self, name: str, value: float, tags: Dict[str] = None):
+    def gauge(self, name: str, value: float, tags: Optional[Dict[str, Any]] = None):
         if self.statsd_enabled:
             self._get_statsd_client().gauge(name, value, tags)
