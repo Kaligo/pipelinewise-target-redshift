@@ -14,6 +14,7 @@ import re
 import time
 
 import boto3
+from botocore.config import Config
 import psycopg2
 import psycopg2.extras
 
@@ -298,7 +299,20 @@ class DbSync:
         else:
             aws_session = boto3.session.Session(profile_name=aws_profile)
 
-        self.s3 = aws_session.client("s3")
+        # Configure proxy for boto3 client
+        proxy_options = {
+            "scheme": "http",
+            "host": "proxy.int.kaligo.com",
+            "port": 3128,
+        }
+        proxy_config = Config(
+            proxies={
+                "http": f"{proxy_options['scheme']}://{proxy_options['host']}:{proxy_options['port']}",
+                "https": f"{proxy_options['scheme']}://{proxy_options['host']}:{proxy_options['port']}",
+            }
+        )
+
+        self.s3 = aws_session.client("s3", config=proxy_config)
         self.skip_updates = self.connection_config.get("skip_updates", False)
         self.full_refresh = self.connection_config.get("full_refresh", False)
 
@@ -496,6 +510,8 @@ class DbSync:
             {"name": safe_column_name(name), "trans": column_trans(schema)}
             for (name, schema) in self.flatten_schema.items()
         ]
+
+        self.logger.debug('CURRENT CONFIG: %s', self.connection_config)
 
         with self.open_connection() as connection:
             with connection.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:

@@ -94,6 +94,7 @@ class TestFastSyncLoader:
         rows_uploaded=100,
         files_uploaded=1,
         replication_method=None,
+        file_format="csv",
     ):
         """Helper to create FastSyncS3Info for tests"""
         return FastSyncS3Info(
@@ -103,6 +104,7 @@ class TestFastSyncLoader:
             rows_uploaded=rows_uploaded,
             files_uploaded=files_uploaded,
             replication_method=replication_method or "FULL_TABLE",
+            file_format=file_format,
         )
 
     def _get_sql_calls(self, mock_cursor, sql_keyword):
@@ -406,6 +408,31 @@ class TestFastSyncLoader:
         assert "REGION 'us-east-1'" not in copy_sql, (
             "Should not add new REGION when one already exists"
         )
+
+    @patch("target_redshift.db_sync.psycopg2.connect")
+    def test_fast_sync_parquet_copy_format(self, mock_connect):
+        """Test that parquet files use FORMAT AS PARQUET and no CSV clause"""
+        config_no_cleanup = self.config.copy()
+        config_no_cleanup["cleanup_s3_files"] = False
+
+        loader, mock_cursor, _ = self._create_loader(
+            config=config_no_cleanup, mock_connect=mock_connect, mock_boto3=None
+        )
+
+        s3_info = self._create_s3_info(
+            s3_path="test/path/data.parquet",
+            files_uploaded=2,
+            file_format="parquet",
+            rows_uploaded=10,
+        )
+        loader.load_from_s3(s3_info)
+
+        copy_sql = " ".join(self._get_sql_strings(mock_cursor))
+        assert "FORMAT AS PARQUET" in copy_sql, "Should set parquet format"
+        assert " CSV" not in copy_sql, "Should not include CSV clause for parquet"
+        assert "EMPTYASNULL" not in copy_sql, "Should not include csv copy options for parquet"
+        assert "REGION" not in copy_sql, "Should omit REGION for parquet"
+        assert "test/path/data" in copy_sql, "Should trim .parquet for multiple files"
 
     @patch("target_redshift.db_sync.boto3")
     @patch("target_redshift.db_sync.psycopg2.connect")

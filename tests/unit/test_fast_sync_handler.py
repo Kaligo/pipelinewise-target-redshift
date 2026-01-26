@@ -48,6 +48,7 @@ class TestFastSyncHandler:
             "s3_region": "us-east-1",
             "files_uploaded": 1,
             "replication_method": "FULL_TABLE",
+            "file_format": "csv",
         }
         message.update(overrides)
         return message
@@ -188,6 +189,7 @@ class TestFastSyncHandler:
         assert call_args.rows_uploaded == 100
         assert call_args.files_uploaded == 1
         assert call_args.replication_method == "FULL_TABLE"
+        assert call_args.file_format == "csv"
 
     @patch("target_redshift.fast_sync.handler.FastSyncLoader")
     def test_load_from_s3_error(self, mock_loader_class):
@@ -224,6 +226,7 @@ class TestFastSyncHandler:
         assert call_args.rows_uploaded == 0  # Default value when not provided
         assert call_args.files_uploaded == 2
         assert call_args.replication_method == "FULL_TABLE"
+        assert call_args.file_format == "csv"
 
     def test_flush_operations_empty_queue(self):
         """Test flush_operations with empty queue"""
