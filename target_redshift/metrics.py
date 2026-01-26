@@ -25,5 +25,5 @@ class MetricsClient:
 
     def gauge(self, name: str, value: float, tags: Optional[Dict[str, Any]] = None):
         if self.statsd_enabled:
-            logger.debug(f"Emitting metric {name} with value {value} and tags {tags}")
+            logger.info(f"Emitting metric {name} with value {value} and tags {tags}")
             self._get_statsd_client().gauge(name, value, tags)
