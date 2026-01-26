@@ -5,14 +5,24 @@ This module handles loading data from S3 into Redshift using the fast sync strat
 It extracts data loading logic from DbSync to provide a cleaner separation of concerns.
 """
 
+import base64
 import json
+import os
 import re
+import shutil
+import tempfile
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 import psycopg2.extras
+import boto3
+import pyarrow as pa
 
 from target_redshift.db_sync import safe_column_name, column_trans, primary_column_names
 
+from pyiceberg.catalog import load_catalog
+from pyiceberg.exceptions import NoSuchTableError
+from pyiceberg.io.pyarrow import pyarrow_to_schema
+from pyiceberg.partitioning import PartitionSpec
 
 @dataclass
 class FastSyncS3Info:
@@ -24,10 +34,21 @@ class FastSyncS3Info:
     files_uploaded: int
     replication_method: str
     rows_uploaded: int = 0
+    file_format: str = "csv"
+    pyarrow_schema: Optional[pa.Schema] = None
 
     @classmethod
     def from_message(cls, message: Dict[str, Any]) -> "FastSyncS3Info":
         """Create FastSyncS3Info from a message dictionary."""
+        pyarrow_schema = None
+        if "pyarrow_schema" in message:
+            # Convert base64-encoded serialized PyArrow schema back to PyArrow schema
+            # The schema is stored as base64-encoded serialized bytes in the message
+            schema_data = message["pyarrow_schema"]
+            # Decode base64 string to bytes and deserialize to PyArrow schema
+            schema_bytes = base64.b64decode(schema_data.encode('utf-8'))
+            pyarrow_schema = pa.ipc.read_schema(pa.py_buffer(schema_bytes))
+
         return cls(
             s3_bucket=message["s3_bucket"],
             s3_path=message["s3_path"],
@@ -35,6 +56,8 @@ class FastSyncS3Info:
             files_uploaded=message["files_uploaded"],
             replication_method=message["replication_method"],
             rows_uploaded=message.get("rows_uploaded", 0),
+            file_format=message.get("file_format", "csv"),
+            pyarrow_schema=pyarrow_schema,
         )
 
 
@@ -69,6 +92,483 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
         """
         return value.replace("'", "''")
 
+    @staticmethod
+    def _assign_pyarrow_field_ids(pa_fields: List[pa.Field], field_id: List[int]) -> List[pa.Field]:
+        """
+        Assign field IDs to PyArrow schema fields.
+
+        Based on: https://github.com/SidetrekAI/target-iceberg/blob/6152e26e587d69ea74bdf4de909571d61790dfab/target_iceberg/iceberg.py#L137-L160
+
+        Args:
+            pa_fields: List of PyArrow fields
+            field_id: Mutable list containing current field ID [0] (will be incremented)
+
+        Returns:
+            List of fields with field IDs assigned
+        """
+        new_fields = []
+        for field in pa_fields:
+            if isinstance(field.type, pa.StructType):
+                # Handle nested struct types recursively
+                field_indices = list(range(field.type.num_fields))
+                struct_fields = [field.type.field(field_i) for field_i in field_indices]
+                nested_pa_fields = FastSyncLoader._assign_pyarrow_field_ids(struct_fields, field_id)
+                new_fields.append(
+                    pa.field(field.name, pa.struct(nested_pa_fields), nullable=field.nullable, metadata=field.metadata)
+                )
+            else:
+                # Assign field ID to non-struct fields
+                field_id[0] += 1
+                # Add field ID to metadata
+                metadata = field.metadata or {}
+                # Convert bytes metadata to dict if needed
+                if isinstance(metadata, dict):
+                    metadata = {k.decode() if isinstance(k, bytes) else k:
+                               v.decode() if isinstance(v, bytes) else v
+                               for k, v in metadata.items()}
+                else:
+                    metadata = {}
+                metadata["PARQUET:field_id"] = str(field_id[0])
+                field_with_metadata = field.with_metadata(metadata)
+                new_fields.append(field_with_metadata)
+
+        return new_fields
+
+    @staticmethod
+    def _add_field_ids_to_pyarrow_schema(pyarrow_schema: pa.Schema) -> pa.Schema:
+        """
+        Add field IDs to PyArrow schema for Iceberg compatibility.
+
+        Args:
+            pyarrow_schema: PyArrow schema without field IDs
+
+        Returns:
+            PyArrow schema with field IDs in metadata
+        """
+        pa_fields_with_field_ids = FastSyncLoader._assign_pyarrow_field_ids(list(pyarrow_schema), [0])
+        return pa.schema(pa_fields_with_field_ids)
+
+    def _development_only_setup_glue_catalog_config(
+        self, catalog_properties: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        DEVELOPMENT ONLY: Setup AWS Glue catalog configuration for development.
+
+        Sets up:
+        - Region: ap-southeast-1
+        - Warehouse: s3://data-team-iceberg-playground/glue-catalog
+
+        Note: AWS_PROFILE and HTTP_PROXY are handled by _development_only_with_aws_env wrapper.
+
+        Args:
+            catalog_properties: Existing catalog properties dictionary
+
+        Returns:
+            Updated catalog_properties dictionary
+        """
+        # Set development region
+        catalog_properties["client.region"] = "ap-southeast-1"
+        catalog_properties["warehouse"] = "s3://data-team-iceberg-playground/glue-catalog"
+
+        self.logger.info(
+            "DEVELOPMENT ONLY: Using region=%s, warehouse=%s for Glue catalog",
+            catalog_properties["client.region"],
+            catalog_properties["warehouse"],
+        )
+
+        return catalog_properties
+
+    def _development_only_restore_aws_profile(
+        self, original_aws_profile: Optional[str], original_http_proxy: Optional[str], original_https_proxy: Optional[str]
+    ) -> None:
+        """
+        DEVELOPMENT ONLY: Restore original AWS_PROFILE, HTTP_PROXY, and HTTPS_PROXY environment variables.
+
+        Args:
+            original_aws_profile: Original AWS_PROFILE value to restore, or None
+            original_http_proxy: Original HTTP_PROXY value to restore, or None
+            original_https_proxy: Original HTTPS_PROXY value to restore, or None
+        """
+        if original_aws_profile is None:
+            # Remove AWS_PROFILE if it wasn't set originally
+            os.environ.pop("AWS_PROFILE", None)
+        else:
+            # Restore original value
+            os.environ["AWS_PROFILE"] = original_aws_profile
+
+        if original_http_proxy is None:
+            # Remove HTTP_PROXY if it wasn't set originally
+            os.environ.pop("HTTP_PROXY", None)
+        else:
+            # Restore original value
+            os.environ["HTTP_PROXY"] = original_http_proxy
+
+        if original_https_proxy is None:
+            # Remove HTTPS_PROXY if it wasn't set originally
+            os.environ.pop("HTTPS_PROXY", None)
+        else:
+            # Restore original value
+            os.environ["HTTPS_PROXY"] = original_https_proxy
+
+    def _development_only_with_aws_env(self, func, *args, **kwargs):
+        """
+        DEVELOPMENT ONLY: Wrapper method to set AWS_PROFILE and HTTP_PROXY environment variables
+        before executing a function, then restore them afterwards.
+
+        This ensures S3 operations use the correct AWS profile and proxy settings.
+
+        Args:
+            func: Function to execute with environment variables set
+            *args: Positional arguments to pass to func
+            **kwargs: Keyword arguments to pass to func
+
+        Returns:
+            Return value of func
+        """
+        # Set AWS profile for development
+        aws_profile = "ascenda-sandbox"
+        original_aws_profile = os.environ.get("AWS_PROFILE")
+        os.environ["AWS_PROFILE"] = aws_profile
+
+        # Set HTTP_PROXY and HTTPS_PROXY for development
+        http_proxy = "http://proxy.int.kaligo.com:3128"
+        original_http_proxy = os.environ.get("HTTP_PROXY")
+        original_https_proxy = os.environ.get("HTTPS_PROXY")
+        os.environ["HTTP_PROXY"] = http_proxy
+        os.environ["HTTPS_PROXY"] = http_proxy
+        # Also set NO_PROXY to empty to ensure proxy is used for all requests
+        os.environ.pop("NO_PROXY", None)
+
+        try:
+            # Execute the function with environment variables set
+            return func(*args, **kwargs)
+        finally:
+            # Restore original environment variables
+            self._development_only_restore_aws_profile(
+                original_aws_profile, original_http_proxy, original_https_proxy
+            )
+
+    def _create_or_load_iceberg_table(
+        self,
+        columns_with_trans: List[Dict[str, str]],
+        target_table: str,
+        s3_info: Optional[FastSyncS3Info] = None,
+    ) -> Tuple[Any, str]:
+        """
+        Create or load an Iceberg table.
+
+        This function:
+        - Initializes the Iceberg catalog
+        - Creates namespace if it doesn't exist
+        - Builds Iceberg schema from columns
+        - Creates the table if it doesn't exist, or loads it if it does
+
+        Args:
+            columns_with_trans: List of column definitions with transformations
+            target_table: Target table name (schema.table format)
+            s3_info: Optional FastSyncS3Info containing PyArrow schema from parquet file
+
+        Returns:
+            Tuple of (table object, table_identifier)
+        """
+        # Get catalog configuration from connection_config
+        # Use AWS Glue catalog as per AWS documentation:
+        # https://docs.aws.amazon.com/prescriptive-guidance/latest/apache-iceberg-on-aws/iceberg-pyiceberg.html
+        # Use dbname from connection_config as catalog name
+        catalog_name = self.connection_config.get("dbname", "default")
+        catalog_properties = self.connection_config.get("iceberg_catalog_properties", {})
+
+        # DEVELOPMENT ONLY: Override region and warehouse
+        catalog_properties = self._development_only_setup_glue_catalog_config(
+            catalog_properties
+        )
+
+        # Initialize the AWS Glue catalog
+        # AWS credentials and proxy are automatically picked up from environment variables
+        # set by _development_only_with_aws_env wrapper
+        catalog = load_catalog(catalog_name, **catalog_properties, type="glue")
+
+        # Normalize table_identifier: remove quotes, replace special characters, convert to lowercase
+        # Handle cases like: "dev_manvuong__loyalty_engine".db/"users_safe"
+        normalized_table = target_table.lower()
+        # Remove quotes and other special characters
+        normalized_table = normalized_table.replace('"', '').replace("'", "")
+        # Replace forward slashes and other path separators with dots
+        normalized_table = normalized_table.replace("/", ".").replace("\\", ".")
+        # Remove any double dots that might result
+        while ".." in normalized_table:
+            normalized_table = normalized_table.replace("..", ".")
+        # Split by dot to get schema and table
+        parts = [part.strip() for part in normalized_table.split(".") if part.strip()]
+
+        if len(parts) >= 2:
+            # Use the last two parts as namespace and table
+            namespace = parts[-2]
+            table_name = parts[-1]
+            table_identifier = f"{namespace}.{table_name}"
+        elif len(parts) == 1:
+            # Only table name provided, use default schema
+            namespace = self.connection_config.get("default_target_schema", "public")
+            table_name = parts[0]
+            table_identifier = f"{namespace}.{table_name}"
+        else:
+            # Fallback if normalization results in empty
+            namespace = self.connection_config.get("default_target_schema", "public")
+            table_identifier = f"{namespace}.{target_table.lower()}"
+
+        self.logger.info(
+            "Creating or loading Iceberg table: %s", table_identifier
+        )
+
+        # Create namespace if it doesn't exist
+        catalog.create_namespace_if_not_exists(namespace)
+
+        self.logger.info("Using PyArrow schema from s3_info for Iceberg table")
+        # Add field IDs to PyArrow schema before conversion
+        # Based on: https://github.com/SidetrekAI/target-iceberg/blob/6152e26e587d69ea74bdf4de909571d61790dfab/target_iceberg/iceberg.py#L137-L160
+        pyarrow_schema_with_ids = self._add_field_ids_to_pyarrow_schema(s3_info.pyarrow_schema)
+        # Convert PyArrow schema to Iceberg schema
+        schema = pyarrow_to_schema(pyarrow_schema_with_ids)
+
+        # Load table if it exists, otherwise create it
+        try:
+            table = catalog.load_table(table_identifier)
+            self.logger.info("Loaded existing Iceberg table: %s", table_identifier)
+        except NoSuchTableError:
+            properties = {
+                "format-version": "3",
+            }
+
+            # Table doesn't exist, so create it
+            table = catalog.create_table(
+                identifier=table_identifier,
+                partition_spec=PartitionSpec.identity("_sdc_batched_at"),
+                schema=schema,
+                properties=properties,
+            )
+            self.logger.info("Created new Iceberg table: %s", table_identifier)
+
+        return table, table_identifier
+
+    def _build_parquet_file_paths(self, s3_info: FastSyncS3Info) -> List[str]:
+        """
+        Build list of S3 paths for parquet files.
+
+        Args:
+            s3_info: FastSyncS3Info value object containing S3 information
+
+        Returns:
+            List of S3 paths to parquet files
+        """
+        # Build S3 paths for parquet files
+        # Match the pattern used by aws_s3.query_export_to_s3: path, path_part2, path_part3, etc.
+        s3_base_path = f"s3://{s3_info.s3_bucket}/{s3_info.s3_path}"
+        parquet_files = []
+
+        if s3_info.files_uploaded == 1:
+            # Single file - use the path as-is
+            parquet_files.append(s3_base_path)
+        else:
+            # Multiple files - main file and part files
+            # The main file is s3_info.s3_path
+            parquet_files.append(s3_base_path)
+
+            # Part files follow the pattern: {s3_path}_part{part_num}
+            # Remove .parquet extension if present to build base path
+            base_key = s3_info.s3_path
+            if base_key.endswith(".parquet"):
+                base_key = base_key[:-8]
+
+            # Add part files (part2, part3, etc.)
+            for part_num in range(2, s3_info.files_uploaded + 1):
+                part_key = f"{base_key}_part{part_num}.parquet"
+                part_path = f"s3://{s3_info.s3_bucket}/{part_key}"
+                parquet_files.append(part_path)
+
+        return parquet_files
+
+    def _development_only_copy_parquet_files_to_playground(
+        self, parquet_files: List[str]
+    ) -> List[str]:
+        """
+        DEVELOPMENT ONLY: Copy parquet files to data-team-iceberg-playground bucket.
+
+        This function:
+        - Downloads parquet files from original S3 location to local temp directory
+        - Uploads them to data-team-iceberg-playground bucket in ap-southeast-1 region
+        - Uses ascenda-sandbox AWS profile for the upload
+
+        Args:
+            parquet_files: List of original S3 paths (s3://bucket/key format)
+
+        Returns:
+            List of new S3 paths in data-team-iceberg-playground bucket
+        """
+        target_bucket = "data-team-iceberg-playground"
+        target_region = "ap-southeast-1"
+
+        self.logger.info(
+            "DEVELOPMENT ONLY: Copying %d parquet file(s) to %s bucket",
+            len(parquet_files),
+            target_bucket,
+        )
+
+        # Create S3 clients with different profiles and proxy configuration
+        # boto3 needs explicit proxy configuration via Config
+        from botocore.config import Config
+
+        http_proxy = os.environ.get("HTTP_PROXY", "http://proxy.int.kaligo.com:3128")
+        boto3_config = Config(
+            proxies={
+                'http': http_proxy,
+                'https': http_proxy,
+            }
+        )
+
+        # Use different profiles for source and target
+        source_profile = "ascenda-bnz-stg"
+        target_profile = "ascenda-sandbox"
+
+        source_s3_session = boto3.Session(profile_name=source_profile)
+        source_s3_client = source_s3_session.client("s3", region_name=target_region, config=boto3_config)
+
+        target_s3_session = boto3.Session(profile_name=target_profile)
+        target_s3_client = target_s3_session.client("s3", region_name=target_region, config=boto3_config)
+
+        new_parquet_files = []
+        temp_dir = tempfile.mkdtemp()
+
+        try:
+            for s3_path in parquet_files:
+                # Parse S3 path
+                if not s3_path.startswith("s3://"):
+                    raise ValueError(f"Invalid S3 path: {s3_path}")
+
+                path_parts = s3_path[5:].split("/", 1)  # Remove 's3://' prefix
+                source_bucket = path_parts[0]
+                source_key = path_parts[1] if len(path_parts) > 1 else ""
+
+                if not source_key:
+                    raise ValueError(f"Empty S3 key in path: {s3_path}")
+
+                # Extract filename from key (use the full key path to preserve structure)
+                filename = os.path.basename(source_key)
+                if not filename:
+                    # Fallback: use the key itself if no basename
+                    filename = source_key.replace("/", "_")
+
+                # Use full key path for local file to avoid conflicts
+                # Replace slashes with underscores for local filesystem
+                safe_filename = source_key.replace("/", "_")
+                local_file_path = os.path.join(temp_dir, safe_filename)
+
+                # Download file to temp directory using profile-based S3 client
+                self.logger.debug(
+                    "Downloading s3://%s/%s to %s", source_bucket, source_key, local_file_path
+                )
+                source_s3_client.download_file(source_bucket, source_key, local_file_path)
+
+                # Upload to target bucket using profile-based S3 client
+                # Use the same key structure in the target bucket with development prefix
+                target_key = f"glue-data/{source_key}"
+                self.logger.debug(
+                    "Uploading %s to s3://%s/%s", local_file_path, target_bucket, target_key
+                )
+                target_s3_client.upload_file(local_file_path, target_bucket, target_key)
+
+                new_s3_path = f"s3://{target_bucket}/{target_key}"
+                new_parquet_files.append(new_s3_path)
+                self.logger.info(
+                    "Copied %s -> %s", s3_path, new_s3_path
+                )
+
+        finally:
+            # Clean up temp directory
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            self.logger.debug("Cleaned up temporary directory: %s", temp_dir)
+
+        return new_parquet_files
+
+    def _add_files_to_iceberg_table(
+        self,
+        table: Any,
+        table_identifier: str,
+        parquet_files: List[str],
+    ) -> None:
+        """
+        Add parquet files to an Iceberg table.
+
+        Args:
+            table: Iceberg table object
+            table_identifier: Table identifier (schema.table format)
+            parquet_files: List of S3 paths to parquet files to add
+        """
+        # DEVELOPMENT ONLY: Override region and warehouse
+        # Note: AWS_PROFILE and HTTP_PROXY are handled by _development_only_with_aws_env wrapper
+        catalog_properties = {}
+        catalog_properties = self._development_only_setup_glue_catalog_config(
+            catalog_properties
+        )
+
+        self.logger.info(
+            "Adding %d parquet file(s) to Iceberg table: %s",
+            len(parquet_files),
+            table_identifier
+        )
+        table.add_files(parquet_files)
+        self.logger.info(
+            "Successfully added parquet files to Iceberg table: %s", table_identifier
+        )
+
+
+    def _load_parquet_to_iceberg(
+        self,
+        stream_schema_message: Dict[str, Any],
+        columns_with_trans: List[Dict[str, str]],
+        s3_info: FastSyncS3Info,
+        target_table: str,
+    ) -> None:
+        """
+        Load parquet file from S3 to Iceberg table using pyiceberg.
+
+        This function orchestrates:
+        - Creating or loading the Iceberg table
+        - Adding the existing parquet file on S3 to the Iceberg table using add_files
+
+        Args:
+            stream_schema_message: Stream schema message containing stream information
+            columns_with_trans: List of column definitions with transformations
+            s3_info: FastSyncS3Info value object containing S3 information
+            target_table: Target table name (schema.table format)
+        """
+        # DEVELOPMENT ONLY: Wrap entire operation with AWS_PROFILE and HTTP_PROXY
+        def _execute_load():
+            try:
+                # Create or load the Iceberg table
+                table, table_identifier = self._create_or_load_iceberg_table(
+                    columns_with_trans,
+                    target_table,
+                    s3_info,
+                )
+
+                # Build parquet file paths
+                parquet_files = self._build_parquet_file_paths(s3_info)
+
+                # DEVELOPMENT ONLY: Copy files to playground bucket
+                parquet_files = self._development_only_copy_parquet_files_to_playground(parquet_files)
+
+                # Add files to Iceberg table
+                self._add_files_to_iceberg_table(table, table_identifier, parquet_files)
+
+            except Exception as exc:
+                self.logger.error(
+                    "Failed to load parquet file to Iceberg table: %s", str(exc), exc_info=True
+                )
+                raise
+
+        # Execute with environment variables set
+        self._development_only_with_aws_env(_execute_load)
+
     def _build_copy_credentials(self) -> str:
         if self.connection_config.get("aws_redshift_copy_role_arn"):
             role_arn = self._escape_sql_string(
@@ -96,7 +596,11 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
             {aws_session_token}
         """.strip()
 
-    def _build_copy_options(self, s3_region: str) -> str:
+    def _build_copy_options(self, s3_region: str, file_format: str) -> str:
+        if file_format.lower() == "parquet":
+            # Parquet COPY in Redshift doesn't support most options (including REGION when using manifests/prefix).
+            return ""
+
         copy_options = self.connection_config.get(
             "copy_options",
             """
@@ -118,9 +622,12 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
     @staticmethod
     def _build_s3_copy_path(s3_info: FastSyncS3Info) -> str:
         s3_copy_path = f"s3://{s3_info.s3_bucket}/{s3_info.s3_path}"
-        if s3_info.files_uploaded > 1 and s3_copy_path.endswith(".csv"):
+        if s3_info.files_uploaded > 1:
             # For multiple files, use prefix pattern.
-            s3_copy_path = s3_copy_path[:-4]
+            if s3_copy_path.endswith(".csv"):
+                s3_copy_path = s3_copy_path[:-4]
+            elif s3_copy_path.endswith(".parquet"):
+                s3_copy_path = s3_copy_path[:-8]
         return s3_copy_path
 
     def _build_copy_sql(
@@ -132,13 +639,14 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
         column_names = ", ".join(c["name"] for c in columns_with_trans)
         s3_copy_path = self._build_s3_copy_path(s3_info)
         copy_credentials = self._build_copy_credentials()
-        copy_options = self._build_copy_options(s3_info.s3_region)
+        copy_options = self._build_copy_options(s3_info.s3_region, s3_info.file_format)
+        format_clause = "FORMAT AS PARQUET" if s3_info.file_format.lower() == "parquet" else "CSV"
 
         return f"""COPY {table_name} ({column_names})
             FROM '{s3_copy_path}'
             {copy_credentials}
             {copy_options}
-            CSV
+            {format_clause}
         """.strip()
 
     def _perform_full_refresh(
@@ -484,24 +992,45 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
             with connection.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                 inserts = updates = deletions = 0
 
-                if self.append_only or not has_key_properties:
-                    # Append-only mode: directly copy from S3 to target table
-                    inserts = s3_info.rows_uploaded
-                    self._append_all_records(
-                        cur,
-                        target_table,
-                        columns_with_trans,
-                        s3_info,
+                # Load parquet file to Iceberg table if file format is parquet
+                if s3_info.file_format.lower() == "parquet":
+                    stage_table = self.db_sync.table_name(stream, is_stage=True)
+
+                    self.logger.info(
+                        "Fast sync: Loading %s rows from s3://%s/%s into %s iceberg table",
+                        s3_info.rows_uploaded,
+                        s3_info.s3_bucket,
+                        s3_info.s3_path,
+                        stage_table,
                     )
-                else:
-                    # Staging table mode: load via staging table and merge
-                    inserts, updates, deletions = self._load_via_staging(
-                        cur,
+
+                    self._load_parquet_to_iceberg(
                         stream_schema_message,
-                        target_table,
                         columns_with_trans,
                         s3_info,
+                        target_table,
                     )
+
+                    self.logger.info("Fast sync: Loaded data into iceberg table")
+                else:
+                    if self.append_only or not has_key_properties:
+                        # Append-only mode: directly copy from S3 to target table
+                        inserts = s3_info.rows_uploaded
+                        self._append_all_records(
+                            cur,
+                            target_table,
+                            columns_with_trans,
+                            s3_info,
+                        )
+                    else:
+                        # Staging table mode: load via staging table and merge
+                        inserts, updates, deletions = self._load_via_staging(
+                            cur,
+                            stream_schema_message,
+                            target_table,
+                            columns_with_trans,
+                            s3_info,
+                        )
 
                 if self.cleanup_s3_files:
                     # Clean up S3 files

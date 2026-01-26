@@ -24,6 +24,8 @@ setup(
         "psycopg2-binary==2.9.11",
         "inflection==0.4.0",
         "joblib>=1.5.0",
+        "pyiceberg",
+        "pyarrow",
         'urllib3>=2.6.1,<3.0.0; python_version >= "3.10"',
         'urllib3>=1.25.4,<1.27; python_version < "3.10"',
     ],
