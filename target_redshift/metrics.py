@@ -1,7 +1,9 @@
 from typing import Dict, Any, Optional
+import logging
 
 from statsd import StatsClient
 
+logger = logging.getLogger(__name__)
 
 class MetricsClient:
     def __init__(self, config: Dict[str, Any]):
@@ -23,4 +25,5 @@ class MetricsClient:
 
     def gauge(self, name: str, value: float, tags: Optional[Dict[str, Any]] = None):
         if self.statsd_enabled:
+            logger.debug(f"Emitting metric {name} with value {value} and tags {tags}")
             self._get_statsd_client().gauge(name, value, tags)
