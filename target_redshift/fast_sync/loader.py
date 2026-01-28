@@ -262,26 +262,4 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
                     self.db_sync.table_name(stream, False),
                     json.dumps(result_info),
                 )
-
-                self.db_sync.metrics.gauge(
-                    "fast_sync.inserts",
-                    inserts,
-                    tags={
-                        "stream": stream,
-                    }
-                )
-                self.db_sync.metrics.gauge(
-                    "fast_sync.updates",
-                    updates,
-                )
-                self.db_sync.metrics.gauge(
-                    "fast_sync.deletions",
-                    deletions,
-                    tags={
-                        "stream": stream,
-                    }
-                )
-                self.db_sync.metrics.gauge(
-                    "fast_sync.rows_loaded",
-                    rows_uploaded,
-                )
+                self.db_sync.metrics.data_sync_gauge(result_info, stream)

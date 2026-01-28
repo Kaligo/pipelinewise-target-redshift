@@ -546,27 +546,7 @@ class DbSync:
                         json.dumps(result_info),
                     )
                 )
-                self.metrics.gauge(
-                    "sync.inserts",
-                    inserts,
-                    tags={
-                        "stream": stream,
-                    }
-                )
-                self.metrics.gauge(
-                    "sync.updates",
-                    updates,
-                    tags={
-                        "stream": stream,
-                    }
-                )
-                self.metrics.gauge(
-                    "sync.size_bytes",
-                    size_bytes,
-                    tags={
-                        "stream": stream,
-                    }
-                )
+                self.metrics.data_sync_gauge(result_info, stream)
 
     def primary_key_merge_condition(
         self, target_alias: str = "t", stage_alias: str = "s"
