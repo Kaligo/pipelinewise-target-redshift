@@ -19,6 +19,7 @@ import psycopg2.extras
 
 import inflection
 from singer import get_logger
+from typing import Dict, List, Tuple
 
 from target_redshift.metrics import MetricsClient
 
@@ -26,6 +27,11 @@ from target_redshift.metrics import MetricsClient
 DEFAULT_VARCHAR_LENGTH = 10000
 SHORT_VARCHAR_LENGTH = 256
 LONG_VARCHAR_LENGTH = 65535
+
+
+def escape_sql_string(value: str) -> str:
+    """Escape single quotes in SQL string literals."""
+    return value.replace("'", "''")
 
 
 def validate_config(config):
@@ -152,7 +158,9 @@ def flatten_schema(d, parent_key=[], sep="__", level=0, max_level=0):
                     list(v.values())[0][0]["type"] = ["null", "object"]
                     items.append((new_key, list(v.values())[0][0]))
 
-    key_func = lambda item: item[0]
+    def key_func(item):
+        return item[0]
+
     sorted_items = sorted(items, key=key_func)
     for k, g in itertools.groupby(sorted_items, key=key_func):
         if len(list(g)) > 1:
@@ -303,6 +311,7 @@ class DbSync:
         self.s3 = aws_session.client("s3")
         self.skip_updates = self.connection_config.get("skip_updates", False)
         self.full_refresh = self.connection_config.get("full_refresh", False)
+        self.append_only = self.connection_config.get("append_only", False)
 
         self.schema_name = None
         self.grantees = None
@@ -494,11 +503,7 @@ class DbSync:
             )
         )
 
-        # Get list if columns with types
-        columns_with_trans = [
-            {"name": safe_column_name(name), "trans": column_trans(schema)}
-            for (name, schema) in self.flatten_schema.items()
-        ]
+        columns_with_trans = self.get_columns_with_trans()
 
         with self.open_connection() as connection:
             with connection.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
@@ -509,172 +514,36 @@ class DbSync:
                 cur.execute(self.drop_table_query(is_stage=True))
                 cur.execute(self.create_table_query(is_stage=True))
 
-                # Step 2: Generate copy credentials - prefer role if provided, otherwise use access and secret keys
-                copy_credentials = (
-                    """
-                    iam_role '{aws_role_arn}'
-                """.format(
-                        aws_role_arn=self.connection_config[
-                            "aws_redshift_copy_role_arn"
-                        ]
-                    )
-                    if self.connection_config.get("aws_redshift_copy_role_arn")
-                    else """
-                    ACCESS_KEY_ID '{aws_access_key_id}'
-                    SECRET_ACCESS_KEY '{aws_secret_access_key}'
-                    {aws_session_token}
-                """.format(
-                        aws_access_key_id=self.connection_config["aws_access_key_id"],
-                        aws_secret_access_key=self.connection_config[
-                            "aws_secret_access_key"
-                        ],
-                        aws_session_token="SESSION_TOKEN '{}'".format(
-                            self.connection_config["aws_session_token"]
-                        )
-                        if self.connection_config.get("aws_session_token")
-                        else "",
-                    )
-                )
-
-                # Step 3: Generate copy options - Override defaults from config.json if defined
-                copy_options = self.connection_config.get(
-                    "copy_options",
-                    """
-                    EMPTYASNULL BLANKSASNULL TRIMBLANKS TRUNCATECOLUMNS
-                    TIMEFORMAT 'auto'
-                    COMPUPDATE OFF STATUPDATE OFF
-                """,
-                )
-
-                if compression == "gzip":
-                    compression_option = " GZIP"
-                elif compression == "bzip2":
-                    compression_option = " BZIP2"
-                else:
-                    compression_option = ""
-
-                # Step 4: Load into the stage table
-                copy_sql = """COPY {table} ({columns}) FROM 's3://{s3_bucket}/{s3_key}'
-                    {copy_credentials}
-                    {copy_options}
-                    DELIMITER ',' REMOVEQUOTES ESCAPE{compression_option}
-                """.format(
-                    table=stage_table,
-                    columns=", ".join([c["name"] for c in columns_with_trans]),
-                    s3_bucket=self.connection_config["s3_bucket"],
-                    s3_key=s3_key,
-                    copy_credentials=copy_credentials,
-                    copy_options=copy_options,
-                    compression_option=compression_option,
+                # Step 2: Load into the stage table
+                copy_sql = self._build_copy_sql(
+                    stage_table, columns_with_trans, s3_key, compression
                 )
                 self.logger.debug("Running query: {}".format(copy_sql))
                 cur.execute(copy_sql)
 
-                # step 5/a: full refresh - No downtime insertion
-                if self.full_refresh:
-                    self.logger.info("Performing full refresh")
-                    archived_target_table = self.table_name(
-                        stream, is_stage=False, is_archived=True
-                    )
-                    table_swap_sql = """BEGIN;
-                        ALTER TABLE {} RENAME TO {};
-                        ALTER TABLE {} RENAME TO {};
-                        {};
-                        COMMIT;
-                    """.format(
-                        target_table,
-                        archived_target_table.split(".")[1],
-                        stage_table,
-                        target_table.split(".")[1],
-                        self.drop_table_query(is_stage=False, is_archived=True),
-                    )
-                    self.logger.info(
-                        "Running full-refresh query: {}".format(table_swap_sql)
-                    )
-                    cur.execute(table_swap_sql)
+                # Step 3: Merge data from stage table
+                inserts, updates = self.merge_data_from_stage(
+                    cur,
+                    target_table,
+                    stage_table,
+                    columns_with_trans,
+                    stream=stream,
+                    rows_uploaded=count,
+                )
 
-                else:
-                    # Step 5/b: Insert or Update if primary key defined
-                    #           Do UPDATE first and second INSERT to calculate
-                    #           the number of affected rows correctly
-                    if len(stream_schema_message["key_properties"]) > 0:
-                        # Step 5/b/1: Update existing records
-                        if not self.skip_updates:
-                            update_sql = """UPDATE {}
-                                SET {}
-                                FROM {} s
-                                WHERE {}
-                            """.format(
-                                target_table,
-                                ", ".join(
-                                    [
-                                        "{} = s.{}".format(c["name"], c["name"])
-                                        for c in columns_with_trans
-                                    ]
-                                ),
-                                stage_table,
-                                self.primary_key_merge_condition(),
-                            )
-                            self.logger.debug("Running query: {}".format(update_sql))
-                            cur.execute(update_sql)
-                            updates = cur.rowcount
-
-                        # Step 5/b/2: Insert new records
-                        insert_sql = """INSERT INTO {} ({})
-                            SELECT {}
-                            FROM {} s LEFT JOIN {}
-                            ON {}
-                            WHERE {}
-                        """.format(
-                            target_table,
-                            ", ".join([c["name"] for c in columns_with_trans]),
-                            ", ".join(
-                                ["s.{}".format(c["name"]) for c in columns_with_trans]
-                            ),
-                            stage_table,
-                            target_table,
-                            self.primary_key_merge_condition(),
-                            " AND ".join(
-                                [
-                                    "{}.{} IS NULL".format(target_table, c)
-                                    for c in primary_column_names(stream_schema_message)
-                                ]
-                            ),
-                        )
-                        self.logger.debug("Running query: {}".format(insert_sql))
-                        cur.execute(insert_sql)
-                        inserts = cur.rowcount
-
-                    # Step 5/c: Insert only if no primary key
-                    else:
-                        insert_sql = """INSERT INTO {} ({})
-                            SELECT {}
-                            FROM {} s
-                        """.format(
-                            target_table,
-                            ", ".join([c["name"] for c in columns_with_trans]),
-                            ", ".join(
-                                ["s.{}".format(c["name"]) for c in columns_with_trans]
-                            ),
-                            stage_table,
-                        )
-                        self.logger.debug("Running query: {}".format(insert_sql))
-                        cur.execute(insert_sql)
-                        inserts = cur.rowcount
-
-                # Step 6: Drop stage table
+                # Step 4: Drop stage table
                 cur.execute(self.drop_table_query(is_stage=True))
+
+                result_info = {
+                    "inserts": inserts,
+                    "updates": updates,
+                    "size_bytes": size_bytes,
+                }
 
                 self.logger.info(
                     "Loading into {}: {}".format(
                         self.table_name(stream, False),
-                        json.dumps(
-                            {
-                                "inserts": inserts,
-                                "updates": updates,
-                                "size_bytes": size_bytes,
-                            }
-                        ),
+                        json.dumps(result_info),
                     )
                 )
                 self.metrics.gauge(
@@ -699,20 +568,275 @@ class DbSync:
                     }
                 )
 
-    def primary_key_merge_condition(self):
+    def primary_key_merge_condition(
+        self, target_alias: str = "t", stage_alias: str = "s"
+    ):
         stream_schema_message = self.stream_schema_message
-        names = primary_column_names(stream_schema_message)
         return " AND ".join(
             [
-                "{}.{} = s.{}".format(
-                    self.table_name(stream_schema_message["stream"], False), c, c
-                )
-                for c in names
+                "{}.{} = {}.{}".format(target_alias, c, stage_alias, c)
+                for c in primary_column_names(stream_schema_message)
             ]
         )
 
+    def primary_column_names(self):
+        """Get primary column names for the current stream."""
+        return primary_column_names(self.stream_schema_message)
+
     def column_names(self):
         return [safe_column_name(name) for name in self.flatten_schema]
+
+    def get_columns_with_trans(self):
+        """Get list of columns with their transformations."""
+        return [
+            {"name": safe_column_name(name), "trans": column_trans(schema)}
+            for (name, schema) in self.flatten_schema.items()
+        ]
+
+    def has_key_properties(self):
+        """Check if the stream schema has primary key properties defined."""
+        return len(self.stream_schema_message.get("key_properties", [])) > 0
+
+    def build_copy_credentials(self) -> str:
+        """Build COPY credentials for Redshift COPY command."""
+        if self.connection_config.get("aws_redshift_copy_role_arn"):
+            role_arn = escape_sql_string(
+                self.connection_config["aws_redshift_copy_role_arn"]
+            )
+            return f"IAM_ROLE '{role_arn}'"
+
+        access_key = escape_sql_string(self.connection_config["aws_access_key_id"])
+        secret_key = escape_sql_string(self.connection_config["aws_secret_access_key"])
+
+        aws_session_token = ""
+        if self.connection_config.get("aws_session_token"):
+            session_token = escape_sql_string(
+                self.connection_config["aws_session_token"]
+            )
+            aws_session_token = f"SESSION_TOKEN '{session_token}'"
+
+        return f"""
+            ACCESS_KEY_ID '{access_key}'
+            SECRET_ACCESS_KEY '{secret_key}'
+            {aws_session_token}
+        """.strip()
+
+    def build_copy_options(self, s3_region: str, compression: str = False) -> str:
+        """
+        Build COPY options for Redshift COPY command.
+
+        Args:
+            s3_region: S3 region for the COPY command
+            compression: Compression type ('gzip', 'bzip2', or False/empty string)
+
+        Returns:
+            COPY options string including region and compression if specified
+        """
+        copy_options = self.connection_config.get(
+            "copy_options",
+            """
+            EMPTYASNULL BLANKSASNULL TRIMBLANKS TRUNCATECOLUMNS
+            TIMEFORMAT 'auto'
+            COMPUPDATE OFF STATUPDATE OFF
+        """,
+        ).strip()
+
+        if re.search(r"\bREGION\s+\'[^\']+\'", copy_options, re.IGNORECASE):
+            region_options = copy_options
+        else:
+            escaped_region = escape_sql_string(s3_region)
+            region_options = f"{copy_options} REGION '{escaped_region}'"
+
+        if compression == "gzip":
+            compression_option = " GZIP"
+        elif compression == "bzip2":
+            compression_option = " BZIP2"
+        else:
+            compression_option = ""
+
+        return f"{region_options}{compression_option}"
+
+    def _build_copy_sql(
+        self,
+        stage_table: str,
+        columns_with_trans: List[Dict[str, str]],
+        s3_key: str,
+        compression: str = False,
+    ) -> str:
+        """Build COPY SQL command for loading CSV from S3."""
+        copy_credentials = self.build_copy_credentials()
+        copy_options = self.build_copy_options(
+            self.connection_config.get("s3_region", "us-east-1"), compression
+        )
+
+        return """COPY {table} ({columns}) FROM 's3://{s3_bucket}/{s3_key}'
+                    {copy_credentials}
+                    {copy_options}
+                    DELIMITER ',' REMOVEQUOTES ESCAPE
+                """.format(
+            table=stage_table,
+            columns=", ".join([c["name"] for c in columns_with_trans]),
+            s3_bucket=self.connection_config["s3_bucket"],
+            s3_key=s3_key,
+            copy_credentials=copy_credentials,
+            copy_options=copy_options,
+        )
+
+    def perform_full_refresh(
+        self, cur, stream: str, target_table: str, stage_table: str
+    ) -> None:
+        """Perform full refresh by swapping tables."""
+        self.logger.info("Performing full refresh")
+        archived_target_table = self.table_name(
+            stream, is_stage=False, is_archived=True
+        )
+        archived_table_name = archived_target_table.split(".")[1]
+        target_table_name = target_table.split(".")[1]
+        drop_archived = self.drop_table_query(is_stage=False, is_archived=True)
+
+        table_swap_sql = f"""BEGIN;
+            ALTER TABLE {target_table} RENAME TO {archived_table_name};
+            ALTER TABLE {stage_table} RENAME TO {target_table_name};
+            {drop_archived};
+            COMMIT;
+        """
+
+        self.logger.info("Running full-refresh query: %s", table_swap_sql)
+        cur.execute(table_swap_sql)
+
+    def _update_existing_records(
+        self,
+        cur,
+        target_table: str,
+        stage_table: str,
+        columns_with_trans: List[Dict[str, str]],
+    ) -> int:
+        """
+        Update existing records in target table from stage table.
+
+        Returns:
+            Number of rows updated
+        """
+        if self.skip_updates:
+            return 0
+
+        self.logger.info("Performing data update")
+        set_clause = ", ".join(
+            f"{c['name']} = s.{c['name']}" for c in columns_with_trans
+        )
+        update_sql = f"""UPDATE {target_table} t
+            SET {set_clause}
+            FROM {stage_table} s
+            WHERE {self.primary_key_merge_condition()}
+        """
+        self.logger.debug("Running query: %s", update_sql)
+        cur.execute(update_sql)
+        return cur.rowcount
+
+    def _insert_new_records(
+        self,
+        cur,
+        target_table: str,
+        stage_table: str,
+        columns_with_trans: List[Dict[str, str]],
+    ) -> int:
+        """
+        Insert new records from stage table to target table.
+
+        Returns:
+            Number of rows inserted
+        """
+        self.logger.info("Inserting new records")
+        primary_key_conditions = " AND ".join(
+            f"t.{c} IS NULL" for c in self.primary_column_names()
+        )
+
+        column_names = ", ".join(c["name"] for c in columns_with_trans)
+        column_values = ", ".join(f"s.{c['name']}" for c in columns_with_trans)
+        insert_sql = f"""INSERT INTO {target_table} ({column_names})
+            SELECT {column_values}
+            FROM {stage_table} s LEFT JOIN {target_table} t
+            ON {self.primary_key_merge_condition()}
+            WHERE {primary_key_conditions}
+        """
+        self.logger.debug("Running query: %s", insert_sql)
+        cur.execute(insert_sql)
+        return cur.rowcount
+
+    def _insert_all_records(
+        self,
+        cur,
+        target_table: str,
+        stage_table: str,
+        columns_with_trans: List[Dict[str, str]],
+    ) -> int:
+        """
+        Insert all records from stage table to target table.
+
+        Uses INSERT INTO ... SELECT to copy all records. This works reliably
+        inside transactions, unlike ALTER TABLE APPEND which has transaction limitations.
+
+        Returns:
+            Number of rows inserted
+        """
+        self.logger.info("Inserting all records to the target table")
+        column_names = ", ".join(c["name"] for c in columns_with_trans)
+        column_values = ", ".join(f"s.{c['name']}" for c in columns_with_trans)
+        insert_sql = f"""INSERT INTO {target_table} ({column_names})
+            SELECT {column_values}
+            FROM {stage_table} s
+        """
+        self.logger.debug("Running query: %s", insert_sql)
+        cur.execute(insert_sql)
+        return cur.rowcount
+
+    def merge_data_from_stage(
+        self,
+        cur,
+        target_table: str,
+        stage_table: str,
+        columns_with_trans: List[Dict[str, str]],
+        stream: str = None,
+        rows_uploaded: int = 0,
+    ) -> Tuple[int, int]:
+        """
+        Merge data from stage table into target table.
+
+        Handles full refresh, append-only mode, and update+insert mode based on
+        configuration and table structure.
+
+        Args:
+            cur: Database cursor
+            target_table: Target table name
+            stage_table: Stage table name
+            columns_with_trans: List of column definitions
+            stream: Stream name (for full refresh)
+            rows_uploaded: Number of rows uploaded (for full refresh)
+
+        Returns:
+            Tuple of (inserts, updates) counts
+        """
+        inserts = 0
+        updates = 0
+
+        if self.full_refresh:
+            if stream is None:
+                stream = self.stream_schema_message["stream"]
+            self.perform_full_refresh(cur, stream, target_table, stage_table)
+            inserts = rows_uploaded
+        elif self.append_only or not self.has_key_properties():
+            inserts = self._insert_all_records(
+                cur, target_table, stage_table, columns_with_trans
+            )
+        else:
+            updates = self._update_existing_records(
+                cur, target_table, stage_table, columns_with_trans
+            )
+            inserts = self._insert_new_records(
+                cur, target_table, stage_table, columns_with_trans
+            )
+
+        return inserts, updates
 
     def create_table_query(self, is_stage=False):
         stream_schema_message = self.stream_schema_message
