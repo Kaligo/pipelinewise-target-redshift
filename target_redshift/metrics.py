@@ -17,10 +17,10 @@ class MetricsClient:
     def _get_statsd_client(self):
         if self.statsd_enabled and self._statsd_client is None:
             try:
-                self.statsd_client = StatsClient(
+                self._statsd_client = StatsClient(
                     host=self.statsd_host,
                     port=self.statsd_port,
-                    prefix=f"{self.statsd_namespace}.{self.statsd_prefix}",
+                    prefix=f"{self.statsd_prefix}_{self.statsd_namespace}",
                 )
             except Exception as exc:
                 logger.error(f"Failed to initialize statsd client: {exc}")
@@ -34,7 +34,7 @@ class MetricsClient:
     
     def data_sync_gauge(self, sync_result: dict, stream: str):
         self._gauge(
-            "sync_inserts",
+            "inserts_amount",
             sync_result.get("inserts", 0),
             tags={
                 "stream": stream,
