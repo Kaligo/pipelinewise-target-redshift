@@ -5,6 +5,7 @@ from statsd import StatsClient
 
 logger = logging.getLogger(__name__)
 
+
 class MetricsClient:
     def __init__(self, config: Dict[str, Any]):
         self.statsd_host = config.get("metrics", {}).get("statsd_host")
@@ -24,33 +25,39 @@ class MetricsClient:
                 )
             except Exception as exc:
                 logger.error(f"Failed to initialize statsd client: {exc}")
+                logger.error(
+                    "StatsD host: %s, port: %d, prefix: %s",
+                    self.statsd_host,
+                    self.statsd_port,
+                    f"{self.statsd_prefix}_{self.statsd_namespace}",
+                )
                 return None
         return self._statsd_client
 
     def _gauge(self, name: str, value: float, tags: Optional[Dict[str, Any]] = None):
-        if self.statsd_enabled and (client:=self._get_statsd_client()) is not None:
+        if self.statsd_enabled and (client := self._get_statsd_client()) is not None:
             logger.info(f"Emitting metric {name} with value {value} and tags {tags}")
             client.gauge(name, value, tags)
-    
+
     def data_sync_gauge(self, sync_result: dict, stream: str):
         self._gauge(
             "inserts_amount",
             sync_result.get("inserts", 0),
             tags={
                 "stream": stream,
-            }
+            },
         )
         self._gauge(
             "sync_updates",
             sync_result.get("updates", 0),
             tags={
                 "stream": stream,
-            }
+            },
         )
         self._gauge(
             "sync_size_bytes",
             sync_result.get("size_bytes", 0),
             tags={
                 "stream": stream,
-            }
+            },
         )
