@@ -37,7 +37,11 @@ class MetricsClient:
     def _gauge(self, name: str, value: float, tags: Optional[Dict[str, Any]] = None):
         if self.statsd_enabled and (client := self._get_statsd_client()) is not None:
             logger.info(f"Emitting metric {name} with value {value} and tags {tags}")
-            client.gauge(name, value, tags)
+            formatted_tags = ",".join([f"{key}={value}" for key, value in tags.items()])
+            client.gauge(
+                stat=f"{name},{formatted_tags}",
+                value=value,
+            )
 
     def data_sync_gauge(self, sync_result: dict, stream: str):
         self._gauge(
@@ -50,6 +54,13 @@ class MetricsClient:
         self._gauge(
             "sync_updates",
             sync_result.get("updates", 0),
+            tags={
+                "stream": stream,
+            },
+        )
+        self._gauge(
+            "sync_deletions",
+            sync_result.get("deletions", 0),
             tags={
                 "stream": stream,
             },
