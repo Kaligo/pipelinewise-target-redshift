@@ -546,7 +546,6 @@ class DbSync:
                         json.dumps(result_info),
                     )
                 )
-                self.metrics.data_sync_gauge(result_info, stream)
                 self.metrics.data_sync_incremental(result_info, stream)
 
     def primary_key_merge_condition(
