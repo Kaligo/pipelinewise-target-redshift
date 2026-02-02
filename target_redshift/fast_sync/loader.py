@@ -263,3 +263,4 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
                     json.dumps(result_info),
                 )
                 self.db_sync.metrics.data_sync_gauge(result_info, stream)
+                self.db_sync.metrics.data_sync_incremental(result_info, stream)

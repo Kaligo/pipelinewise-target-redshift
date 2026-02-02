@@ -34,13 +34,21 @@ class MetricsClient:
                 return None
         return self._statsd_client
 
-    def _gauge(self, name: str, value: float, tags: Optional[Dict[str, Any]] = None):
+    def _gauge(self, name: str, value: int, tags: Optional[Dict[str, Any]] = None):
         if self.statsd_enabled and (client := self._get_statsd_client()) is not None:
-            logger.info(f"Emitting metric {name} with value {value} and tags {tags}")
+            logger.info(f"Emitting metric gauge {name} with value {value} and tags {tags}")
             formatted_tags = ",".join([f"{key}={value}" for key, value in tags.items()])
             client.gauge(
                 stat=f"{name},{formatted_tags}",
                 value=value,
+            )
+    def _incremental(self, name: str, value: int, tags: Optional[Dict[str, Any]] = None):
+        if self.statsd_enabled and (client := self._get_statsd_client()) is not None:
+            logger.info(f"Emitting metric incremental {name} with tags {tags}")
+            formatted_tags = ",".join([f"{key}={value}" for key, value in tags.items()])
+            client.incr(
+                f"{name}.total,{formatted_tags}",
+                value,
             )
 
     def data_sync_gauge(self, sync_result: dict, stream: str):
@@ -66,6 +74,36 @@ class MetricsClient:
             },
         )
         self._gauge(
+            "sync_size_bytes",
+            sync_result.get("size_bytes", 0),
+            tags={
+                "stream": stream,
+            },
+        )
+
+    def data_sync_incremental(self, sync_result: dict, stream: str):
+        self._incremental(
+            "inserts_amount",
+            sync_result.get("inserts", 0),
+            tags={
+                "stream": stream,
+            },
+        )
+        self._incremental(
+            "sync_updates",
+            sync_result.get("updates", 0),
+            tags={
+                "stream": stream,
+            },
+        )
+        self._incremental(
+            "sync_deletions",
+            sync_result.get("deletions", 0),
+            tags={
+                "stream": stream,
+            },
+        )
+        self._incremental(
             "sync_size_bytes",
             sync_result.get("size_bytes", 0),
             tags={
