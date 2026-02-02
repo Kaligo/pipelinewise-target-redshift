@@ -49,7 +49,7 @@ class MetricsClient:
             "namespace": self.statsd_namespace,
         }
         self._incremental(
-            "inserts_amount",
+            "sync_inserts",
             sync_result.get("inserts", 0),
             tags=tags
         )
