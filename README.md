@@ -105,6 +105,29 @@ Full list of options in `config.json`:
 | compression                         | String  |    No        | The compression method to use when writing files to S3 and running Redshift `COPY`. The currently supported methods are `gzip` or `bzip2`. Defaults to none (`""`). |
 | slices                              | Integer |    No      | The number of slices to split files into prior to running COPY on Redshift. This should be set to the number of Redshift slices. The number of slices per node depends on the node size of the cluster - run `SELECT COUNT(DISTINCT slice) slices FROM stv_slices` to calculate this. Defaults to `1`. |
 | temp_dir                            | String  |            | (Default: platform-dependent) Directory of temporary CSV files with RECORD messages. |
+| metrics                             | Object  | No         | (Optional) StatsD metrics configuration. See [Metrics section](#metrics) for details. |
+
+### Metrics
+
+The target can optionally emit StatsD metrics. To enable this, add a `metrics` object to your `config.json`:
+
+```json
+{
+  "metrics": {
+    "statsd_host": "localhost",
+    "statsd_port": 8125,
+    "statsd_namespace": "my_namespace",
+    "statsd_enabled": true
+  }
+}
+```
+
+| Property         | Type    | Required? | Description                                      |
+|------------------|---------|-----------|--------------------------------------------------|
+| statsd_host      | String  | No        | StatsD host                                      |
+| statsd_port      | Integer | No        | StatsD port                                      |
+| statsd_namespace | String  | No        | StatsD namespace (added as a tag to all metrics) |
+| statsd_enabled   | Boolean | No        | (Default: False) Enable StatsD metrics           |
 
 ### Fast Sync Support
 
