@@ -1,21 +1,35 @@
 from typing import Dict, Any, Optional
 import logging
+from dataclasses import dataclass, field
 
 from statsd import StatsClient
 
 logger = logging.getLogger(__name__)
 
-
+@dataclass
 class MetricsClient:
-    def __init__(self, config: Dict[str, Any]):
-        self.statsd_host = config.get("metrics", {}).get("statsd_host")
-        self.statsd_port = config.get("metrics", {}).get("statsd_port")
-        self.statsd_prefix = "replication"
-        self.statsd_namespace = config.get("metrics", {}).get("statsd_namespace")
-        self.statsd_enabled = config.get("metrics", {}).get("statsd_enabled", False)
-        self._statsd_client = None
+    """Client for emitting metrics to statsd."""
+    statsd_host: Optional[str] = None
+    statsd_port: Optional[int] = None
+    statsd_namespace: Optional[str] = None
+    statsd_enabled: bool = False
+    statsd_prefix: str = "replication"
+    _statsd_client: Optional[Any] = field(default=None, init=False)
 
-    def _get_statsd_client(self):
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "MetricsClient":
+        """Factory method to create an instance from a config dictionary."""
+        metrics_conf = config.get("metrics", {})
+        return cls(
+            statsd_host=metrics_conf.get("statsd_host"),
+            statsd_port=metrics_conf.get("statsd_port"),
+            statsd_namespace=metrics_conf.get("statsd_namespace"),
+            statsd_enabled=metrics_conf.get("statsd_enabled", False),
+        )
+
+    @property
+    def client(self) -> Any:
+        """Lazy loads the statsd client."""
         if self.statsd_enabled and self._statsd_client is None:
             try:
                 self._statsd_client = StatsClient(
@@ -24,46 +38,46 @@ class MetricsClient:
                     prefix=f"{self.statsd_prefix}",
                 )
             except Exception as exc:
-                logger.error(f"Failed to initialize statsd client: {exc}")
+                logger.error("Failed to initialize statsd client: %s", exc)
                 logger.error(
                     "StatsD host: %s, port: %d, prefix: %s",
                     self.statsd_host,
                     self.statsd_port,
                     f"{self.statsd_prefix}",
                 )
-                return None
         return self._statsd_client
 
-    def _incremental(self, name: str, value: int, tags: Optional[Dict[str, Any]] = None):
-        if self.statsd_enabled and (client := self._get_statsd_client()) is not None:
-            logger.info(f"Emitting metric incremental {name} with tags {tags}")
+    def _inc(self, name: str, value: float, tags: Optional[Dict[str, Any]] = None) -> None:
+        if self.statsd_enabled and self.client:
+            logger.info("Emitting metric %s with tags %s", name, tags)
             formatted_tags = ",".join([f"{key}={value}" for key, value in tags.items()])
-            client.incr(
+            self.client.incr(
                 f"{name}.total,{formatted_tags}",
                 value,
             )
 
-    def data_sync_incremental(self, sync_result: dict, stream: str):
+    def emit_data_sync_metrics(self, sync_result: dict, stream: str):
+        """Emit data sync metrics to statsd."""
         tags = {
             "stream": stream,
             "namespace": self.statsd_namespace,
         }
-        self._incremental(
+        self._inc(
             "sync_inserts",
             sync_result.get("inserts", 0),
             tags=tags
         )
-        self._incremental(
+        self._inc(
             "sync_updates",
             sync_result.get("updates", 0),
             tags=tags
         )
-        self._incremental(
+        self._inc(
             "sync_deletions",
             sync_result.get("deletions", 0),
             tags=tags
         )
-        self._incremental(
+        self._inc(
             "sync_size_bytes",
             sync_result.get("size_bytes", 0),
             tags=tags

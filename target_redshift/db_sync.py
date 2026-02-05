@@ -391,7 +391,7 @@ class DbSync:
                 stream_schema_message["schema"],
                 max_level=self.data_flattening_max_level,
             )
-            self.metrics = MetricsClient(self.connection_config)
+            self.metrics = MetricsClient.from_config(self.connection_config)
 
     def open_connection(self):
         conn_string = "host='{}' dbname='{}' user='{}' password='{}' port='{}'".format(
@@ -546,7 +546,7 @@ class DbSync:
                         json.dumps(result_info),
                     )
                 )
-                self.metrics.data_sync_incremental(result_info, stream)
+                self.metrics.emit_data_sync_metrics(result_info, stream)
 
     def primary_key_merge_condition(
         self, target_alias: str = "t", stage_alias: str = "s"
