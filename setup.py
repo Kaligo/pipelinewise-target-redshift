@@ -26,6 +26,8 @@ setup(
         "joblib>=1.5.0",
         'urllib3>=2.6.1,<3.0.0; python_version >= "3.10"',
         'urllib3>=1.25.4,<1.27; python_version < "3.10"',
+        "pyiceberg>0.10.0",
+        "pyarrow==23.0.0"
     ],
     extras_require={
         "test": ["pylint>=2.17.0", "pytest==6.2.5", "mock==3.0.5", "coverage==4.5.4"]
@@ -34,7 +36,10 @@ setup(
           [console_scripts]
           target-redshift=target_redshift:main
       """,
-    packages=["target_redshift", "target_redshift.fast_sync"],
+    packages=[
+        "target_redshift",
+        "target_redshift.fast_sync",
+    ],
     package_data={},
     include_package_data=True,
 )
