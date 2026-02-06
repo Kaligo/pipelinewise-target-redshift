@@ -27,7 +27,7 @@ setup(
         'urllib3>=2.6.1,<3.0.0; python_version >= "3.10"',
         'urllib3>=1.25.4,<1.27; python_version < "3.10"',
         "pyiceberg>0.10.0",
-        "pyarrow==23.0.0"
+        "pyarrow==23.0.0",
         'statsd==4.0.1',
     ],
     extras_require={
