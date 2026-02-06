@@ -546,7 +546,7 @@ class DbSync:
                         json.dumps(result_info),
                     )
                 )
-                self.metrics.emit_data_sync_metrics(result_info, stream)
+                self.metrics.emit_data_sync_metrics(inserts=inserts, updates=updates, stream=stream)
 
     def primary_key_merge_condition(
         self, target_alias: str = "t", stage_alias: str = "s"

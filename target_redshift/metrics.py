@@ -6,9 +6,11 @@ from statsd import StatsClient
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class MetricsClient:
     """Client for emitting metrics to statsd."""
+
     statsd_host: Optional[str] = None
     statsd_port: Optional[int] = None
     statsd_namespace: Optional[str] = None
@@ -47,7 +49,9 @@ class MetricsClient:
                 )
         return self._statsd_client
 
-    def _inc(self, name: str, value: float, tags: Optional[Dict[str, Any]] = None) -> None:
+    def _inc(
+        self, name: str, value: float, tags: Optional[Dict[str, Any]] = None
+    ) -> None:
         if self.statsd_enabled and self.client:
             logger.info("Emitting metric %s with tags %s", name, tags)
             formatted_tags = ",".join([f"{key}={value}" for key, value in tags.items()])
@@ -56,29 +60,14 @@ class MetricsClient:
                 value,
             )
 
-    def emit_data_sync_metrics(self, sync_result: dict, stream: str):
+    def emit_data_sync_metrics(
+        self, stream: str, inserts: int = 0, updates: int = 0, deletions: int = 0
+    ):
         """Emit data sync metrics to statsd."""
         tags = {
             "stream": stream,
             "namespace": self.statsd_namespace,
         }
-        self._inc(
-            "sync_inserts",
-            sync_result.get("inserts", 0),
-            tags=tags
-        )
-        self._inc(
-            "sync_updates",
-            sync_result.get("updates", 0),
-            tags=tags
-        )
-        self._inc(
-            "sync_deletions",
-            sync_result.get("deletions", 0),
-            tags=tags
-        )
-        self._inc(
-            "sync_size_bytes",
-            sync_result.get("size_bytes", 0),
-            tags=tags
-        )
+        self._inc("sync_inserts", inserts, tags=tags)
+        self._inc("sync_updates", updates, tags=tags)
+        self._inc("sync_deletions", deletions, tags=tags)
