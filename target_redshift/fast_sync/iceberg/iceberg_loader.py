@@ -16,8 +16,8 @@ class FastSyncIcebergLoader:
     ):
         self.logger = db_sync.logger
         self.connection_config = db_sync.connection_config
-        self.catalog_name = "ascenda_lakehouse"
-        self.namespace = self.connection_config.get("namespace")
+        self.catalog_name = db_sync.connection_config.get("iceberg_catalog_name")
+        self.namespace = self.connection_config.get("iceberg_namespace")
         self.iceberg_table_name = f"{self.namespace}.{db_sync.stream_schema_message["stream"].replace('-', '_')}"
         # Make it simpler for now, just one partition column
         self.partition_column = "_sdc_batched_at"

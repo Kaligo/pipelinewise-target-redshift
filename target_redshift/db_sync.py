@@ -21,6 +21,8 @@ import inflection
 from singer import get_logger
 from typing import Dict, List, Tuple
 
+from target_redshift.metrics import MetricsClient
+
 
 DEFAULT_VARCHAR_LENGTH = 10000
 SHORT_VARCHAR_LENGTH = 256
@@ -389,6 +391,7 @@ class DbSync:
                 stream_schema_message["schema"],
                 max_level=self.data_flattening_max_level,
             )
+            self.metrics = MetricsClient.from_config(self.connection_config)
 
     def open_connection(self):
         conn_string = "host='{}' dbname='{}' user='{}' password='{}' port='{}'".format(
@@ -543,6 +546,7 @@ class DbSync:
                         json.dumps(result_info),
                     )
                 )
+                self.metrics.emit_data_sync_metrics(inserts=inserts, updates=updates, stream=stream)
 
     def primary_key_merge_condition(
         self, target_alias: str = "t", stage_alias: str = "s"
