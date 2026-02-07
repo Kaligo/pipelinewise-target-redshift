@@ -245,6 +245,20 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
                     s3_info,
                 )
 
+                if (
+                    self.db_sync.skip_unchanged_rows
+                    and updates == 0
+                    and inserts == 0
+                    and s3_info.rows_uploaded > 0
+                ):
+                    self.db_sync.update_metadata_for_freshness_check(
+                        cur,
+                        target_table,
+                        stage_table,
+                        columns_with_trans,
+                    )
+                    updates = cur.rowcount
+
                 cur.execute(self.db_sync.drop_table_query(is_stage=True))
 
                 if self.cleanup_s3_files:
@@ -256,6 +270,11 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
                     "deletions": deletions,
                     "rows_loaded": s3_info.rows_uploaded,
                 }
+
+                if self.db_sync.skip_unchanged_rows:
+                    result_info["unchanged_rows"] = (
+                        s3_info.rows_uploaded - inserts - updates
+                    )
 
                 self.logger.info(
                     "Fast sync completed for %s: %s",

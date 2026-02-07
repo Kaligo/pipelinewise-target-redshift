@@ -26,10 +26,36 @@ DEFAULT_VARCHAR_LENGTH = 10000
 SHORT_VARCHAR_LENGTH = 256
 LONG_VARCHAR_LENGTH = 65535
 
+METADATA_COLUMNS = {"_SDC_EXTRACTED_AT", "_SDC_BATCHED_AT", "_SDC_DELETED_AT"}
+
 
 def escape_sql_string(value: str) -> str:
     """Escape single quotes in SQL string literals."""
     return value.replace("'", "''")
+
+
+def build_is_distinct_from_condition(left_expr: str, right_expr: str) -> str:
+    """
+    Build an IS DISTINCT FROM condition.
+
+    While IS DISTINCT FROM is not officially supported in Redshift,
+    and it can be rewritten using other operators (e.g.,
+    NOT (a = b OR (a IS NULL AND b IS NULL))), the performance of such
+    workarounds is significantly worse because they're not the native Redshift
+    operator. Therefore, this function uses the native IS DISTINCT FROM syntax.
+
+    This correctly handles the case where one value is NULL and the other is not,
+    and when all values are NULL.
+
+    Args:
+        left_expr: Left expression (e.g., "t.col1")
+        right_expr: Right expression (e.g., "s.col1")
+
+    Returns:
+        SQL condition string: ({left_expr} IS DISTINCT FROM {right_expr})
+    """
+    # return f"(NOT ({left_expr} = {right_expr} OR ({left_expr} IS NULL AND {right_expr} IS NULL)))"
+    return f"({left_expr} IS DISTINCT FROM {right_expr})"
 
 
 def validate_config(config):
@@ -310,6 +336,9 @@ class DbSync:
         self.skip_updates = self.connection_config.get("skip_updates", False)
         self.full_refresh = self.connection_config.get("full_refresh", False)
         self.append_only = self.connection_config.get("append_only", False)
+        self.skip_unchanged_rows = self.connection_config.get(
+            "skip_unchanged_rows", True
+        )
 
         self.schema_name = None
         self.grantees = None
@@ -431,7 +460,7 @@ class DbSync:
         return f'"{self.schema_name}"."{rs_table_name.upper()}"'
 
     def record_primary_key_string(self, record):
-        if len(self.stream_schema_message["key_properties"]) == 0:
+        if not self.has_key_properties():
             return None
         flatten = flatten_record(
             record, self.flatten_schema, max_level=self.data_flattening_max_level
@@ -528,7 +557,17 @@ class DbSync:
                     rows_uploaded=count,
                 )
 
-                # Step 4: Drop stage table
+                # Step 4: Update metadata for freshness check if needed
+                if self.skip_unchanged_rows and updates == 0 and inserts == 0:
+                    self.update_metadata_for_freshness_check(
+                        cur,
+                        target_table,
+                        stage_table,
+                        columns_with_trans,
+                    )
+                    updates = cur.rowcount
+
+                # Step 5: Drop stage table
                 cur.execute(self.drop_table_query(is_stage=True))
 
                 result_info = {
@@ -537,6 +576,9 @@ class DbSync:
                     "size_bytes": size_bytes,
                 }
 
+                if self.skip_unchanged_rows:
+                    result_info["unchanged_rows"] = count - inserts - updates
+
                 self.logger.info(
                     "Loading into {}: {}".format(
                         self.table_name(stream, False),
@@ -544,14 +586,216 @@ class DbSync:
                     )
                 )
 
+    def _filter_non_metadata_columns(
+        self, columns_with_trans: List[Dict[str, str]]
+    ) -> List[Dict[str, str]]:
+        """
+        Filter out metadata columns from the columns list.
+
+        Args:
+            columns_with_trans: List of column definitions with transformations
+
+        Returns:
+            Filtered list without metadata columns
+        """
+        return [
+            c
+            for c in columns_with_trans
+            if c["name"].strip('"').upper() not in METADATA_COLUMNS
+        ]
+
+    def _build_any_column_different_condition(
+        self, columns_with_trans: List[Dict[str, str]]
+    ) -> str:
+        """
+        Build a condition that checks if any non-metadata column is different.
+
+        Returns an OR-joined condition for all non-metadata columns using
+        IS DISTINCT FROM operator.
+
+        Args:
+            columns_with_trans: List of column definitions with transformations
+
+        Returns:
+            SQL condition string, or empty string if no columns
+        """
+        filtered_columns = self._filter_non_metadata_columns(columns_with_trans)
+
+        if not filtered_columns:
+            return ""
+
+        conditions = [
+            build_is_distinct_from_condition(f"t.{c['name']}", f"s.{c['name']}")
+            for c in filtered_columns
+        ]
+
+        return "(" + " OR ".join(conditions) + ")"
+
+    def _build_update_where_clause(
+        self, columns_with_trans: List[Dict[str, str]]
+    ) -> str:
+        """
+        Build WHERE clause for UPDATE statements.
+
+        Includes primary key condition and optionally distinct-from condition
+        for non-metadata columns when skip_unchanged_rows is enabled.
+
+        Args:
+            columns_with_trans: List of column definitions with transformations
+
+        Returns:
+            SQL WHERE clause string
+        """
+        conditions = [self.primary_key_merge_condition()]
+
+        if self.skip_unchanged_rows:
+            distinct_condition = self._build_any_column_different_condition(
+                columns_with_trans
+            )
+            if distinct_condition:
+                conditions.append(distinct_condition)
+
+        return " AND ".join(conditions)
+
+    def _build_distinct_from_conditions_for_insert(
+        self, columns_with_trans: List[Dict[str, str]]
+    ) -> str:
+        """
+        Build conditions to check if all non-metadata columns are identical.
+
+        Uses "t" as the target table alias (consistent with NOT EXISTS subquery).
+        Excludes metadata columns because their values are always different
+        and shouldn't prevent inserts.
+        """
+        filtered_columns = self._filter_non_metadata_columns(columns_with_trans)
+
+        return " AND ".join(
+            [
+                f"NOT ({build_is_distinct_from_condition('t.' + c['name'], 's.' + c['name'])})"
+                for c in filtered_columns
+            ]
+        )
+
+    def _build_insert_sql_with_primary_keys(
+        self,
+        target_table: str,
+        stage_table: str,
+        column_names: str,
+        column_values: str,
+        columns_with_trans: List[Dict[str, str]],
+    ) -> str:
+        """Build INSERT SQL with NOT EXISTS to avoid inserting duplicate records."""
+        conditions = [self.primary_key_merge_condition()]
+
+        if self.skip_unchanged_rows:
+            distinct_from_conditions = self._build_distinct_from_conditions_for_insert(
+                columns_with_trans
+            )
+            conditions.append(distinct_from_conditions)
+
+        where_clause = " AND ".join(conditions)
+
+        # Produces a query to insert if no matching record exists (with same values).
+        return f"""INSERT INTO {target_table} ({column_names})
+            SELECT {column_values}
+            FROM {stage_table} s
+            WHERE NOT EXISTS (
+                SELECT 1 FROM {target_table} t
+                WHERE {where_clause}
+            )
+        """
+
+    def _build_insert_sql_without_primary_keys(
+        self,
+        target_table: str,
+        stage_table: str,
+        column_names: str,
+        column_values: str,
+    ) -> str:
+        return f"""INSERT INTO {target_table} ({column_names})
+            SELECT {column_values}
+            FROM {stage_table} s
+        """
+
+    def update_metadata_for_freshness_check(
+        self,
+        cur,
+        target_table: str,
+        stage_table: str,
+        columns_with_trans: List[Dict[str, str]],
+    ) -> None:
+        """
+        Update one random row's metadata columns for freshness check.
+
+        This is used when skip_unchanged_rows is enabled and no inserts/updates
+        occurred, to ensure DBT freshness checks pass by updating metadata timestamps.
+
+        Args:
+            cur: Database cursor
+            target_table: Target table name
+            stage_table: Stage table name
+            columns_with_trans: List of column definitions with transformations
+        """
+        # Check if metadata columns exist
+        has_metadata = any(
+            c["name"].strip('"').upper() in METADATA_COLUMNS for c in columns_with_trans
+        )
+
+        if not has_metadata:
+            return
+
+        # Check if primary key exists
+        if not self.has_key_properties():
+            return
+
+        # Get metadata columns that exist in the schema
+        metadata_cols = [
+            c
+            for c in columns_with_trans
+            if c["name"].strip('"').upper() in METADATA_COLUMNS
+        ]
+
+        if not metadata_cols:
+            return
+
+        # Build SET clause for metadata columns
+        set_clause = ", ".join(f"{c['name']} = s.{c['name']}" for c in metadata_cols)
+
+        # Build WHERE clause using primary keys (join condition between t and s)
+        primary_key_condition = self.primary_key_merge_condition()
+
+        # Select one random row from stage table (without referencing outer query)
+        # Then join with target table on primary keys in WHERE clause
+        update_sql = f"""UPDATE {target_table} t
+            SET {set_clause}
+            FROM (
+                SELECT {", ".join(c["name"] for c in metadata_cols)}, {", ".join(self.primary_column_names())}
+                FROM {stage_table}
+                LIMIT 1
+            ) s
+            WHERE {primary_key_condition}
+        """
+
+        self.logger.debug("Running metadata update query: %s", update_sql)
+        cur.execute(update_sql)
+
     def primary_key_merge_condition(
         self, target_alias: str = "t", stage_alias: str = "s"
     ):
-        stream_schema_message = self.stream_schema_message
+        """
+        Build primary key merge condition for joining target and stage tables.
+
+        Args:
+            target_alias: Alias for the target table (default: "t")
+            stage_alias: Alias for the stage table (default: "s")
+
+        Returns:
+            SQL condition string for primary key equality
+        """
         return " AND ".join(
             [
                 "{}.{} = {}.{}".format(target_alias, c, stage_alias, c)
-                for c in primary_column_names(stream_schema_message)
+                for c in self.primary_column_names()
             ]
         )
 
@@ -703,7 +947,7 @@ class DbSync:
         update_sql = f"""UPDATE {target_table} t
             SET {set_clause}
             FROM {stage_table} s
-            WHERE {self.primary_key_merge_condition()}
+            WHERE {self._build_update_where_clause(columns_with_trans)}
         """
         self.logger.debug("Running query: %s", update_sql)
         cur.execute(update_sql)
@@ -752,16 +996,28 @@ class DbSync:
         Uses INSERT INTO ... SELECT to copy all records. This works reliably
         inside transactions, unlike ALTER TABLE APPEND which has transaction limitations.
 
+        When primary keys exist, skips inserting records that already exist with identical values.
+
         Returns:
             Number of rows inserted
         """
         self.logger.info("Inserting all records to the target table")
         column_names = ", ".join(c["name"] for c in columns_with_trans)
         column_values = ", ".join(f"s.{c['name']}" for c in columns_with_trans)
-        insert_sql = f"""INSERT INTO {target_table} ({column_names})
-            SELECT {column_values}
-            FROM {stage_table} s
-        """
+
+        if self.has_key_properties():
+            insert_sql = self._build_insert_sql_with_primary_keys(
+                target_table,
+                stage_table,
+                column_names,
+                column_values,
+                columns_with_trans,
+            )
+        else:
+            insert_sql = self._build_insert_sql_without_primary_keys(
+                target_table, stage_table, column_names, column_values
+            )
+
         self.logger.debug("Running query: %s", insert_sql)
         cur.execute(insert_sql)
         return cur.rowcount
@@ -822,12 +1078,8 @@ class DbSync:
         ]
 
         primary_key = (
-            [
-                "PRIMARY KEY ({})".format(
-                    ", ".join(primary_column_names(stream_schema_message))
-                )
-            ]
-            if len(stream_schema_message["key_properties"])
+            ["PRIMARY KEY ({})".format(", ".join(self.primary_column_names()))]
+            if self.has_key_properties()
             else []
         )
 
