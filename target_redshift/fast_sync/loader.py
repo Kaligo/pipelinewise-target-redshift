@@ -20,9 +20,12 @@ class FastSyncS3Info:
     s3_bucket: str
     s3_path: str
     s3_region: str
-    files_uploaded: int
     replication_method: str
+    file_format: str = "csv"
+    files_uploaded: int = 0
     rows_uploaded: int = 0
+    bytes_uploaded: int = 0
+    time_extracted: str = ""
 
     @classmethod
     def from_message(cls, message: Dict[str, Any]) -> "FastSyncS3Info":
@@ -31,9 +34,12 @@ class FastSyncS3Info:
             s3_bucket=message["s3_bucket"],
             s3_path=message["s3_path"],
             s3_region=message["s3_region"],
-            files_uploaded=message["files_uploaded"],
             replication_method=message["replication_method"],
+            file_format=message.get("file_format", "csv"),
+            files_uploaded=message.get("files_uploaded", 0),
             rows_uploaded=message.get("rows_uploaded", 0),
+            bytes_uploaded=message.get("bytes_uploaded", 0),
+            time_extracted=message.get("time_extracted", ""),
         )
 
 

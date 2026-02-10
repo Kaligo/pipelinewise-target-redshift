@@ -16,6 +16,12 @@ class FastSyncIcebergLoader:
         db_sync: DbSync,
         stream_s3_info: FastSyncS3Info,
     ):
+
+        if stream_s3_info.file_format not in ("parquet", "orc", "avro"):
+            raise ValueError(
+                f"Unsupported file format: {stream_s3_info.file_format}. Should be one of: parquet, orc, avro"
+            )
+
         self.logger = db_sync.logger
         self.connection_config = db_sync.connection_config
         self.catalog_name = db_sync.connection_config.get("iceberg_catalog_name")
@@ -27,13 +33,20 @@ class FastSyncIcebergLoader:
         self.s3_region = stream_s3_info.s3_region
         self.s3_bucket = stream_s3_info.s3_bucket
         self.source_s3_path = f"{self.s3_bucket}/{stream_s3_info.s3_path}"
+        self.number_of_files = stream_s3_info.files_uploaded
         self.iceberg_table_location = f"s3://{self.s3_bucket}/iceberg/{self.iceberg_namespace}/{self.iceberg_table}"
         self._source_schema = None
         self._iceberg_catalog = None
         self._iceberg_table = None
 
-    @staticmethod
-    def _sync_iceberg_table_schema(table: Table, source_schema: pa.Schema):
+    def _iterate_source_s3_path(self, s3_path: str, number_of_files: int):
+        for part_num in range(1, number_of_files + 1):
+            if number_of_files > 1:
+                yield f"{s3_path}_part{part_num}"
+            else:
+                yield s3_path
+
+    def _sync_iceberg_table_schema(self, table: Table, source_schema: pa.Schema):
         """
         Evolve the iceberg table schema to match the source schema
         """
@@ -46,26 +59,24 @@ class FastSyncIcebergLoader:
                 for column_name in to_delete:
                     update.delete_column(column_name)
 
-    @staticmethod
-    def _sync_iceberg_table_data(table: Table, source_s3_path: str):
+    def _sync_iceberg_table_data(self, table: Table, s3_file_path: str):
         """
         Sync the iceberg table data from the source S3 path
         This based on the assumption the source data file already has static schema.
         """
-
         with table.transaction() as txt:
             txt.add_files(
-                file_paths=[source_s3_path],
+                file_paths=[s3_file_path],
                 check_duplicate_files=True,
             )
 
-    def _load_source_schema(self) -> pa.Schema:
+    def _load_source_schema(self, s3_file_path: str) -> pa.Schema:
         """
         Get the source schema from the source S3 path
         """
         if not self._source_schema:
             self._source_schema = pq.read_schema(
-                self.source_s3_path,
+                s3_file_path,
                 filesystem=fs.S3FileSystem(
                     region=self.s3_region,
                     access_key=self.connection_config.get("aws_access_key_id"),
@@ -126,10 +137,14 @@ class FastSyncIcebergLoader:
         Load the iceberg table data from the source S3 path
         """
 
-        catalog = self._load_iceberg_catalog()
-        source_schema = self._load_source_schema()
-        table = self._load_iceberg_table(catalog, source_schema)
+        for s3_file_path in self._iterate_source_s3_path(
+            self.source_s3_path, self.number_of_files
+        ):
+            self.logger.info("Loading iceberg table data from %s", s3_file_path)
+            catalog = self._load_iceberg_catalog()
+            source_schema = self._load_source_schema(s3_file_path)
+            table = self._load_iceberg_table(catalog, source_schema)
 
-        # Syncing iceberg table schema and data
-        self._sync_iceberg_table_schema(table, source_schema)
-        self._sync_iceberg_table_data(table, f"s3://{self.source_s3_path}")
+            # Syncing iceberg table schema and data
+            self._sync_iceberg_table_schema(table, source_schema)
+            self._sync_iceberg_table_data(table, s3_file_path)
