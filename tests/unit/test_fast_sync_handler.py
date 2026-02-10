@@ -175,7 +175,7 @@ class TestFastSyncHandler:
         db = MagicMock()
         message = self._create_valid_message(rows_uploaded=100)
 
-        fast_sync_handler.load_from_s3("test_stream", message, db)
+        fast_sync_handler.load_from_s3("test_stream", message, db, iceberg_enabled=False)
 
         mock_loader_class.assert_called_once_with(db)
         # Verify load_from_s3 was called with FastSyncS3Info dataclass
@@ -201,7 +201,9 @@ class TestFastSyncHandler:
         message = self._create_valid_message(replication_method="INCREMENTAL")
 
         with pytest.raises(Exception, match="Load failed"):
-            fast_sync_handler.load_from_s3("test_stream", message, db)
+            fast_sync_handler.load_from_s3(
+                "test_stream", message, db, iceberg_enabled=False
+            )
 
         # Verify load_from_s3 was called
         mock_loader.load_from_s3.assert_called_once()
@@ -214,7 +216,9 @@ class TestFastSyncHandler:
         db = MagicMock()
         message = self._create_valid_message(s3_region="us-west-2", files_uploaded=2)
 
-        fast_sync_handler.load_from_s3("test_stream", message, db)
+        fast_sync_handler.load_from_s3(
+            "test_stream", message, db, iceberg_enabled=False
+        )
 
         # Verify load_from_s3 was called with FastSyncS3Info dataclass
         assert mock_loader.load_from_s3.call_count == 1
@@ -229,10 +233,32 @@ class TestFastSyncHandler:
         assert s3_info.files_uploaded == 2
         assert s3_info.replication_method == "FULL_TABLE"
 
+    @patch("target_redshift.fast_sync.handler.FastSyncIcebergLoader")
+    def test_load_from_s3_iceberg_enabled_uses_iceberg_loader(self, mock_iceberg_class):
+        """Test that when iceberg_enabled=True, FastSyncIcebergLoader is used"""
+        mock_iceberg_loader = MagicMock()
+        mock_iceberg_class.return_value = mock_iceberg_loader
+
+        db = MagicMock()
+        message = self._create_valid_message(rows_uploaded=50)
+
+        fast_sync_handler.load_from_s3(
+            "test_schema-test_table", message, db, iceberg_enabled=True
+        )
+
+        mock_iceberg_class.assert_called_once()
+        call_args = mock_iceberg_class.call_args[0]
+        assert call_args[0] is db
+        assert isinstance(call_args[1], FastSyncS3Info)
+        assert call_args[1].s3_bucket == "test-bucket"
+        assert call_args[1].s3_path == "test/path/data.csv"
+        assert call_args[1].rows_uploaded == 50
+        mock_iceberg_loader.load_from_s3.assert_called_once_with()
+
     def test_flush_operations_empty_queue(self):
         """Test flush_operations with empty queue"""
         # Should return early without any processing
-        fast_sync_handler.flush_operations({}, {}, 4, 16)
+        fast_sync_handler.flush_operations({}, {}, 4, 16, False)
 
     @patch("target_redshift.fast_sync.handler.Parallel")
     def test_flush_operations_with_parallelism(self, mock_parallel_class):
@@ -242,7 +268,9 @@ class TestFastSyncHandler:
 
         fast_sync_queue, stream_to_sync = self._create_fast_sync_queue_and_streams(2)
 
-        fast_sync_handler.flush_operations(fast_sync_queue, stream_to_sync, 2, 16)
+        fast_sync_handler.flush_operations(
+            fast_sync_queue, stream_to_sync, 2, 16, iceberg_enabled=False
+        )
 
         # Verify Parallel was instantiated and called
         mock_parallel_class.assert_called_once()
@@ -255,7 +283,9 @@ class TestFastSyncHandler:
         fast_sync_queue, stream_to_sync = self._create_fast_sync_queue_and_streams(3)
 
         # parallelism=0 should use min(n_streams, max_parallelism)
-        fast_sync_handler.flush_operations(fast_sync_queue, stream_to_sync, 0, 2)
+        fast_sync_handler.flush_operations(
+            fast_sync_queue, stream_to_sync, 0, 2, iceberg_enabled=False
+        )
 
         # Verify parallel processing was invoked
         mock_parallel.assert_called_once()

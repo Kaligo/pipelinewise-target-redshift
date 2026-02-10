@@ -307,7 +307,7 @@ class TestTargetRedshift:
         target_redshift.flush_fast_sync_queue(fast_sync_queue, stream_to_sync, config)
 
         mock_flush_operations.assert_called_once_with(
-            fast_sync_queue, stream_to_sync, 2, 16
+            fast_sync_queue, stream_to_sync, 2, 16, False
         )
         assert fast_sync_queue == {}
 
@@ -329,7 +329,7 @@ class TestTargetRedshift:
         target_redshift.flush_fast_sync_queue(fast_sync_queue, stream_to_sync, config)
 
         mock_flush_operations.assert_called_once_with(
-            fast_sync_queue, stream_to_sync, 0, 16
+            fast_sync_queue, stream_to_sync, 0, 16, False
         )
         assert fast_sync_queue == {}
 
