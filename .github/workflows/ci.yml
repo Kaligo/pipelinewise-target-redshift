@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        python-version: [3.9, 3.12]
+        python-version: [3.12]
 
     steps:
       - name: Checking out repo
@@ -32,8 +32,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install --pre --upgrade pip setuptools wheel
-          pip install --pre .[test]
+          pip install --upgrade pip setuptools wheel
+          pip install .[test]
 
       - name: Check if pylint is happy
         run: pylint target_redshift -d C,W,unexpected-keyword-arg --fail-under=9.5
