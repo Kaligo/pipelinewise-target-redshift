@@ -102,6 +102,9 @@ Full list of options in `config.json`:
 | append_only                         | Boolean |    No      | (Default: False) In fast sync mode, append all records from the stage table to the target table without performing updates or deletions. This is useful for immutable data like events where you only want to append new records. When enabled, all records from the stage table are inserted into the target table regardless of whether they already exist.
 | detect_deletions                    | Boolean |    No      | (Default: False) Enable deletion detection in fast sync mode. When enabled, records that exist in the target table but not in the stage table will be marked as deleted by setting the `_SDC_DELETED_AT` timestamp. Requires `add_metadata_columns` to be enabled, tables to have primary keys defined, and `FULL_TABLE` replication method. This option only works with `FULL_TABLE` replication method and does not work with incremental updates or full refresh mode. |
 | cleanup_s3_files                    | Boolean |    No      | (Default: True) **Fast sync mode only.** Automatically clean up S3 files after they have been successfully loaded into Redshift. When set to False, S3 files will be retained after loading. This is useful for debugging or when you need to keep the exported files for other purposes. This setting only applies to fast sync operations and has no effect in regular sync mode. |
+| iceberg_enabled                     | Boolean |    No      | (Default: False) **Fast sync mode only.** When true, fast sync loads data into Apache Iceberg tables (via AWS Glue catalog) instead of Redshift. Requires `iceberg_catalog_name` and `iceberg_namespace`. |
+| iceberg_catalog_name                | String  |    No      | **Fast sync Iceberg only.** Name of the Iceberg catalog (e.g. Glue catalog name) to use when `iceberg_enabled` is true. |
+| iceberg_namespace                   | String  |    No      | **Fast sync Iceberg only.** Iceberg namespace (database/schema) for table creation when `iceberg_enabled` is true. |
 | compression                         | String  |    No        | The compression method to use when writing files to S3 and running Redshift `COPY`. The currently supported methods are `gzip` or `bzip2`. Defaults to none (`""`). |
 | slices                              | Integer |    No      | The number of slices to split files into prior to running COPY on Redshift. This should be set to the number of Redshift slices. The number of slices per node depends on the node size of the cluster - run `SELECT COUNT(DISTINCT slice) slices FROM stv_slices` to calculate this. Defaults to `1`. |
 | temp_dir                            | String  |            | (Default: platform-dependent) Directory of temporary CSV files with RECORD messages. |
@@ -198,6 +201,67 @@ However, ensure your Redshift cluster has the proper IAM role configured:
 ```
 
 For more information about setting up fast sync on the tap side, see the [tap-postgres Fast Sync documentation](https://github.com/Kaligo/pipelinewise-tap-postgres?tab=readme-ov-file#fast-sync-rds-requirements).
+
+#### Fast Sync Iceberg
+
+When **Iceberg** is enabled, fast sync loads data into **Apache Iceberg** tables instead of Redshift. This is useful when you want to land data in a lakehouse (e.g. S3 + Glue) for querying with engines like Spark, Trino, or Athena, while still using the same tap and fast sync pipeline.
+
+##### How Fast Sync Iceberg Works
+
+1. **Same trigger as Fast Sync**: The tap exports data to S3 and embeds `fast_sync_s3_info` in STATE messages.
+2. **Target behaviour**: When `iceberg_enabled` is true, the target uses `FastSyncIcebergLoader` instead of the Redshift loader for each fast sync operation.
+3. **Per stream**:
+   - Reads the **source Parquet schema** from the S3 path.
+   - Uses the **AWS Glue** catalog to create the namespace (if missing) and the Iceberg table (if missing).
+   - **Evolves the Iceberg table schema** to match the source (add columns by name, remove columns that no longer exist in the source).
+   - **Adds the source Parquet file(s)** to the Iceberg table as new data files (no rewrite; append-only at the file level).
+4. **Table layout**:
+   - **Identifier**: `{iceberg_namespace}.{stream_name}` (stream name with `-` replaced by `_`).
+   - **Location**: `s3://{s3_bucket}/iceberg/{iceberg_namespace}/{table_name}`.
+   - **Partitioning**: By day on `_sdc_batched_at` (e.g. `_sdc_batched_at_day`).
+   - **Sort order**: Ascending on `_sdc_batched_at`, nulls first.
+
+##### Fast Sync Iceberg Requirements
+
+- **Fast sync**: Must be used with a tap that supports fast sync and exports to S3 (e.g. tap-postgres fast sync).
+- **Source format**: Source data in S3 must be **Parquet**; the loader reads schema and metadata from it.
+- **AWS Glue catalog**: The Iceberg catalog is **Glue**; the Glue catalog name is set via `iceberg_catalog_name`.
+- **AWS credentials**: Same as for the target (e.g. `aws_access_key_id`, `aws_secret_access_key`, optional `aws_session_token`); used for Glue and S3.
+- **S3 bucket**: The same `s3_bucket` as in config is used; Iceberg table data is stored under `s3://{s3_bucket}/iceberg/{iceberg_namespace}/{table_name}`.
+
+##### Fast Sync Iceberg Configuration
+
+| Property               | Type    | Required? | Description                                                                 |
+|------------------------|---------|-----------|-----------------------------------------------------------------------------|
+| iceberg_enabled        | Boolean | No        | (Default: False) When true, fast sync loads into Iceberg instead of Redshift. |
+| iceberg_catalog_name   | String  | Yes*      | *Required if iceberg_enabled is true.* Glue catalog name for Iceberg.       |
+| iceberg_namespace     | String  | Yes*      | *Required if iceberg_enabled is true.* Iceberg namespace (e.g. database name). |
+
+Example with Iceberg:
+
+```json
+{
+  "host": "xxxxxx.redshift.amazonaws.com",
+  "port": 5439,
+  "user": "my_user",
+  "password": "password",
+  "dbname": "database_name",
+  "aws_access_key_id": "secret",
+  "aws_secret_access_key": "secret",
+  "s3_bucket": "my-bucket",
+  "default_target_schema": "my_schema",
+  "iceberg_enabled": true,
+  "iceberg_catalog_name": "glue_catalog",
+  "iceberg_namespace": "my_iceberg_db"
+}
+```
+
+##### Fast Sync Iceberg Benefits
+
+- **Lakehouse landing**: Data lands in Iceberg on S3, queryable by Spark, Trino, Athena, etc.
+- **Schema evolution**: Table schema is updated to match the source (add/remove columns).
+- **Efficient appends**: New syncs add files to the table without rewriting existing data.
+- **Partitioning and ordering**: Day partitioning and sort order on `_sdc_batched_at` support time-based pruning and ordering.
 
 ### To run tests:
 
