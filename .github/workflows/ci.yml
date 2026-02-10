@@ -32,7 +32,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip setuptools wheel
+          pip install --pre --upgrade pip setuptools wheel
           pip install --pre .[test]
 
       - name: Check if pylint is happy
