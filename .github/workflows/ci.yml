@@ -33,7 +33,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip setuptools wheel
-          pip install .[test]
+          pip install --pre .[test]
 
       - name: Check if pylint is happy
         run: pylint target_redshift -d C,W,unexpected-keyword-arg --fail-under=9.5
