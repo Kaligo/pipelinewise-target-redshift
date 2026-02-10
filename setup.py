@@ -40,6 +40,7 @@ setup(
     packages=[
         "target_redshift",
         "target_redshift.fast_sync",
+        "target_redshift.fast_sync.iceberg"
     ],
     package_data={},
     include_package_data=True,

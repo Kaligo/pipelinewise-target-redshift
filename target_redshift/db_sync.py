@@ -299,14 +299,13 @@ class DbSync:
                 aws_secret_access_key=aws_secret_access_key,
                 aws_session_token=aws_session_token,
             )
-            credentials = aws_session.get_credentials().get_frozen_credentials()
-
-            # Explicitly set credentials to those fetched from Boto so we can re-use them in COPY SQL if necessary
-            self.connection_config["aws_access_key_id"] = credentials.access_key
-            self.connection_config["aws_secret_access_key"] = credentials.secret_key
-            self.connection_config["aws_session_token"] = credentials.token
         else:
             aws_session = boto3.session.Session(profile_name=aws_profile)
+
+        credentials = aws_session.get_credentials().get_frozen_credentials()
+        self.connection_config["aws_access_key_id"] = credentials.access_key
+        self.connection_config["aws_secret_access_key"] = credentials.secret_key
+        self.connection_config["aws_session_token"] = credentials.token
 
         self.s3 = aws_session.client("s3")
         self.skip_updates = self.connection_config.get("skip_updates", False)

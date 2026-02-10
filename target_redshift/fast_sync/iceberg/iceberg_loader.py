@@ -1,4 +1,6 @@
 import pyarrow as pa
+import pyarrow.parquet as pq
+import pyarrow.fs as fs
 from pyiceberg.catalog import load_catalog, Catalog
 from pyiceberg.table import Table
 from pyiceberg.table.sorting import NullOrder
@@ -17,14 +19,15 @@ class FastSyncIcebergLoader:
         self.logger = db_sync.logger
         self.connection_config = db_sync.connection_config
         self.catalog_name = db_sync.connection_config.get("iceberg_catalog_name")
-        self.namespace = self.connection_config.get("iceberg_namespace")
-        self.iceberg_table_name = f"{self.namespace}.{db_sync.stream_schema_message["stream"].replace('-', '_')}"
+        self.iceberg_namespace = self.connection_config.get("iceberg_namespace")
+        self.iceberg_table = db_sync.stream_schema_message["stream"].replace("-", "_")
+        self.iceberg_table_identifier = f"{self.iceberg_namespace}.{self.iceberg_table}"
         # Make it simpler for now, just one partition column
         self.partition_column = "_sdc_batched_at"
         self.s3_region = stream_s3_info.s3_region
         self.s3_bucket = stream_s3_info.s3_bucket
-        self.source_s3_path = f"s3://{self.s3_bucket}/{stream_s3_info.s3_path}"
-
+        self.source_s3_path = f"{self.s3_bucket}/{stream_s3_info.s3_path}"
+        self.iceberg_table_location = f"s3://{self.s3_bucket}/iceberg/{self.iceberg_namespace}/{self.iceberg_table}"
         self._source_schema = None
         self._iceberg_catalog = None
         self._iceberg_table = None
@@ -61,9 +64,9 @@ class FastSyncIcebergLoader:
         Get the source schema from the source S3 path
         """
         if not self._source_schema:
-            self._source_schema = pa.parquet.read_schema(
+            self._source_schema = pq.read_schema(
                 self.source_s3_path,
-                filesystem=pa.fs.S3FileSystem(
+                filesystem=fs.S3FileSystem(
                     region=self.s3_region,
                     access_key=self.connection_config.get("aws_access_key_id"),
                     secret_key=self.connection_config.get("aws_secret_access_key"),
@@ -87,7 +90,7 @@ class FastSyncIcebergLoader:
                 "client.session-token": self.connection_config.get("aws_session_token"),
             }
             self._iceberg_catalog = load_catalog(self.catalog_name, **catalog_props)
-            self._iceberg_catalog.create_namespace_if_not_exists(self.namespace)
+            self._iceberg_catalog.create_namespace_if_not_exists(self.iceberg_namespace)
         return self._iceberg_catalog
 
     def _load_iceberg_table(self, catalog: Catalog, schema: pa.Schema) -> Table:
@@ -95,12 +98,13 @@ class FastSyncIcebergLoader:
         Load the iceberg table and create it if it doesn't exist
         """
         if not self._iceberg_table:
-            if catalog.table_exists(self.iceberg_table_name):
-                self._iceberg_table = catalog.load_table(self.iceberg_table_name)
+            if catalog.table_exists(self.iceberg_table_identifier):
+                self._iceberg_table = catalog.load_table(self.iceberg_table_identifier)
             else:
                 self._iceberg_table = catalog.create_table(
-                    identifier=self.iceberg_table_name,
+                    identifier=self.iceberg_table_identifier,
                     schema=schema,
+                    location=self.iceberg_table_location,
                 )
                 with self._iceberg_table.transaction() as txt:
                     with txt.update_spec() as update:
@@ -128,4 +132,4 @@ class FastSyncIcebergLoader:
 
         # Syncing iceberg table schema and data
         self._sync_iceberg_table_schema(table, source_schema)
-        self._sync_iceberg_table_data(table, self.source_s3_path)
+        self._sync_iceberg_table_data(table, f"s3://{self.source_s3_path}")
