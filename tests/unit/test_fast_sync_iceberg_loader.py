@@ -301,8 +301,8 @@ class TestFastSyncIcebergLoader:
         assert mock_sync_schema.call_count == 2
         assert mock_sync_data.call_count == 2
         assert mock_sync_data.call_args_list[0][0][1] == (
-            "my-bucket/fast_sync/export/path/data.parquet_part1"
+            "s3://my-bucket/fast_sync/export/path/data.parquet_part1"
         )
         assert mock_sync_data.call_args_list[1][0][1] == (
-            "my-bucket/fast_sync/export/path/data.parquet_part2"
+            "s3://my-bucket/fast_sync/export/path/data.parquet_part2"
         )
