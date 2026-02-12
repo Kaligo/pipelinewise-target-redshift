@@ -71,7 +71,7 @@ class TestFastSyncIcebergLoader:
         assert loader.partition_column == "_sdc_batched_at"
         assert loader.s3_region == "us-east-1"
         assert loader.s3_bucket == "my-bucket"
-        assert loader.source_s3_path == "s3://my-bucket/fast_sync/export/path/data.parquet"
+        assert loader.source_s3_path == "my-bucket/fast_sync/export/path/data.parquet"
         assert (
             loader.iceberg_table_location
             == "s3://my-bucket/iceberg/my_iceberg_db/test_schema_test_table"
@@ -189,7 +189,7 @@ class TestFastSyncIcebergLoader:
         assert call_kw["client.region"] == "us-east-1"
 
     def test_sync_iceberg_table_data_calls_add_files(self):
-        """Test _sync_iceberg_table_data calls add_files with single file path and check_duplicate_files"""
+        """Test _sync_iceberg_table_data calls add_files with bucket/key path (prepends s3:// for PyIceberg)"""
         mock_table = MagicMock()
         mock_txt = MagicMock()
         mock_table.transaction.return_value.__enter__.return_value = mock_txt
@@ -197,12 +197,12 @@ class TestFastSyncIcebergLoader:
 
         db = self._create_db_sync()
         loader = FastSyncIcebergLoader(db, self.s3_info)
-        s3_file_path = "s3://my-bucket/path/file.parquet"
+        s3_file_path = "my-bucket/path/file.parquet"
         loader._sync_iceberg_table_data(mock_table, s3_file_path)
 
         mock_table.transaction.assert_called_once()
         mock_txt.add_files.assert_called_once_with(
-            file_paths=[s3_file_path],
+            file_paths=["s3://my-bucket/path/file.parquet"],
             check_duplicate_files=True,
         )
 
@@ -262,7 +262,7 @@ class TestFastSyncIcebergLoader:
 
         mock_sync_data.assert_called_once()
         assert mock_sync_data.call_args[0][0] is mock_table
-        assert mock_sync_data.call_args[0][1] == "s3://my-bucket/fast_sync/export/path/data.parquet"
+        assert mock_sync_data.call_args[0][1] == "my-bucket/fast_sync/export/path/data.parquet"
 
     @patch(
         "target_redshift.fast_sync.iceberg.iceberg_loader.pq.read_schema",
@@ -301,8 +301,8 @@ class TestFastSyncIcebergLoader:
         assert mock_sync_schema.call_count == 2
         assert mock_sync_data.call_count == 2
         assert mock_sync_data.call_args_list[0][0][1] == (
-            "s3://my-bucket/fast_sync/export/path/data.parquet_part1"
+            "my-bucket/fast_sync/export/path/data.parquet_part1"
         )
         assert mock_sync_data.call_args_list[1][0][1] == (
-            "s3://my-bucket/fast_sync/export/path/data.parquet_part2"
+            "my-bucket/fast_sync/export/path/data.parquet_part2"
         )

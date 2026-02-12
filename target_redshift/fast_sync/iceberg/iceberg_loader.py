@@ -32,7 +32,7 @@ class FastSyncIcebergLoader:
         self.partition_column = "_sdc_batched_at"
         self.s3_region = stream_s3_info.s3_region
         self.s3_bucket = stream_s3_info.s3_bucket
-        self.source_s3_path = f"s3://{self.s3_bucket}/{stream_s3_info.s3_path}"
+        self.source_s3_path = f"{self.s3_bucket}/{stream_s3_info.s3_path}"
         self.number_of_files = stream_s3_info.files_uploaded
         self.iceberg_table_location = f"s3://{self.s3_bucket}/iceberg/{self.iceberg_namespace}/{self.iceberg_table}"
         self._source_schema = None
@@ -66,7 +66,8 @@ class FastSyncIcebergLoader:
         """
         with table.transaction() as txt:
             txt.add_files(
-                file_paths=[s3_file_path],
+                # s3_file_path is bucket/key (from _iterate_source_s3_path); add_files expects a full s3:// URI, so we prepend the prefix.
+                file_paths=[f"s3://{s3_file_path}"],
                 check_duplicate_files=True,
             )
 
@@ -76,6 +77,7 @@ class FastSyncIcebergLoader:
         """
         if not self._source_schema:
             self._source_schema = pq.read_schema(
+                # s3_file_path must be bucket/key (no s3://); PyArrow S3FileSystem rejects URIs.
                 s3_file_path,
                 filesystem=fs.S3FileSystem(
                     region=self.s3_region,
