@@ -32,7 +32,7 @@ class FastSyncIcebergLoader:
         self.partition_column = "_sdc_batched_at"
         self.s3_region = stream_s3_info.s3_region
         self.s3_bucket = stream_s3_info.s3_bucket
-        self.source_s3_path = f"{self.s3_bucket}/{stream_s3_info.s3_path}"
+        self.source_s3_path = f"s3://{self.s3_bucket}/{stream_s3_info.s3_path}"
         self.number_of_files = stream_s3_info.files_uploaded
         self.iceberg_table_location = f"s3://{self.s3_bucket}/iceberg/{self.iceberg_namespace}/{self.iceberg_table}"
         self._source_schema = None
