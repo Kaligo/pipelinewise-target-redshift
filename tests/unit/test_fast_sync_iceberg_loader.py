@@ -71,7 +71,7 @@ class TestFastSyncIcebergLoader:
         assert loader.partition_column == "_sdc_batched_at"
         assert loader.s3_region == "us-east-1"
         assert loader.s3_bucket == "my-bucket"
-        assert loader.source_s3_path == "my-bucket/fast_sync/export/path/data.parquet"
+        assert loader.source_s3_path == "s3://my-bucket/fast_sync/export/path/data.parquet"
         assert (
             loader.iceberg_table_location
             == "s3://my-bucket/iceberg/my_iceberg_db/test_schema_test_table"
@@ -262,8 +262,7 @@ class TestFastSyncIcebergLoader:
 
         mock_sync_data.assert_called_once()
         assert mock_sync_data.call_args[0][0] is mock_table
-        # Path from _iterate_source_s3_path is bucket/path (no s3:// prefix)
-        assert mock_sync_data.call_args[0][1] == "my-bucket/fast_sync/export/path/data.parquet"
+        assert mock_sync_data.call_args[0][1] == "s3://my-bucket/fast_sync/export/path/data.parquet"
 
     @patch(
         "target_redshift.fast_sync.iceberg.iceberg_loader.pq.read_schema",
