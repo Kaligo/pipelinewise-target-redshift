@@ -153,34 +153,30 @@ class TestFastSyncIcebergLoader:
         assert mock_read_schema.call_args[0][0] == s3_file_path
 
     @patch("target_redshift.fast_sync.iceberg.iceberg_loader.load_catalog")
-    def test_load_iceberg_catalog_caches_catalog(self, mock_load_catalog):
-        """Test _load_iceberg_catalog is cached (load_catalog called once)"""
+    def testiceberg_catalog_caches_catalog(self, mock_load_catalog):
+        """Test iceberg_catalog is cached (load_catalog called once)"""
         mock_catalog = MagicMock()
         mock_load_catalog.return_value = mock_catalog
 
         db = self._create_db_sync()
         loader = FastSyncIcebergLoader(db, self.s3_info)
-        loader._source_schema = pa.schema([("id", pa.int64())])  # avoid pq.read_schema
-        loader._iceberg_table = MagicMock()  # avoid create_table path
 
-        cat1 = loader._load_iceberg_catalog()
-        cat2 = loader._load_iceberg_catalog()
+        cat1 = loader.iceberg_catalog
+        cat2 = loader.iceberg_catalog
 
         assert cat1 is cat2
         mock_load_catalog.assert_called_once()
 
     @patch("target_redshift.fast_sync.iceberg.iceberg_loader.load_catalog")
-    def test_load_iceberg_catalog_passes_glue_properties(self, mock_load_catalog):
-        """Test _load_iceberg_catalog passes Glue type and region to load_catalog"""
+    def testiceberg_catalog_passes_glue_properties(self, mock_load_catalog):
+        """Test iceberg_catalog passes Glue type and region to load_catalog"""
         mock_catalog = MagicMock()
         mock_load_catalog.return_value = mock_catalog
 
         db = self._create_db_sync()
         loader = FastSyncIcebergLoader(db, self.s3_info)
-        loader._source_schema = pa.schema([("id", pa.int64())])
-        loader._iceberg_table = MagicMock()
 
-        loader._load_iceberg_catalog()
+        _ = loader.iceberg_catalog
 
         mock_load_catalog.assert_called_once()
         assert mock_load_catalog.call_args[0][0] == "glue_catalog"
@@ -188,17 +184,23 @@ class TestFastSyncIcebergLoader:
         assert call_kw["type"] == "glue"
         assert call_kw["client.region"] == "us-east-1"
 
-    def test_sync_iceberg_table_data_calls_add_files(self):
-        """Test _sync_iceberg_table_data calls add_files with bucket/key path (prepends s3:// for PyIceberg)"""
+    @patch("target_redshift.fast_sync.iceberg.iceberg_loader.fs.S3FileSystem")
+    @patch(
+        "target_redshift.fast_sync.iceberg.iceberg_loader.pq.read_schema",
+        return_value=pa.schema([("id", pa.int64())]),
+    )
+    def test_sync_iceberg_table_calls_add_files(self, mock_read_schema, mock_s3fs):
+        """Test _sync_iceberg_table calls add_files with bucket/key path (prepends s3:// for PyIceberg)"""
         mock_table = MagicMock()
         mock_txt = MagicMock()
         mock_table.transaction.return_value.__enter__.return_value = mock_txt
         mock_table.transaction.return_value.__exit__.return_value = None
+        mock_table.schema.return_value.as_arrow.return_value.names = ["id"]
 
         db = self._create_db_sync()
         loader = FastSyncIcebergLoader(db, self.s3_info)
         s3_file_path = "my-bucket/path/file.parquet"
-        loader._sync_iceberg_table_data(mock_table, s3_file_path)
+        loader._sync_iceberg_table(mock_table, s3_file_path)
 
         mock_table.transaction.assert_called_once()
         mock_txt.add_files.assert_called_once_with(
@@ -206,8 +208,16 @@ class TestFastSyncIcebergLoader:
             check_duplicate_files=True,
         )
 
-    def test_sync_iceberg_table_schema_union_and_delete(self):
-        """Test _sync_iceberg_table_schema calls update_schema with union_by_name and delete_column"""
+    @patch("target_redshift.fast_sync.iceberg.iceberg_loader.fs.S3FileSystem")
+    @patch("target_redshift.fast_sync.iceberg.iceberg_loader.pq.read_schema")
+    def test_sync_iceberg_table_schema_union_and_delete(self, mock_read_schema, mock_s3fs):
+        """Test _sync_iceberg_table calls update_schema with union_by_name and delete_column"""
+        # Table has a,b; source has a,b,c -> union adds c; to_delete = source - table = {c}
+        source_schema = pa.schema(
+            [("a", pa.int64()), ("b", pa.string()), ("c", pa.int64())]
+        )
+        mock_read_schema.return_value = source_schema
+
         mock_table = MagicMock()
         mock_txt = MagicMock()
         mock_update = MagicMock()
@@ -215,16 +225,11 @@ class TestFastSyncIcebergLoader:
         mock_txt.update_schema.return_value.__exit__.return_value = None
         mock_table.transaction.return_value.__enter__.return_value = mock_txt
         mock_table.transaction.return_value.__exit__.return_value = None
-
-        # Table has a,b; source has a,b,c -> union adds c; to_delete = source - table = {c}
-        source_schema = pa.schema(
-            [("a", pa.int64()), ("b", pa.string()), ("c", pa.int64())]
-        )
         mock_table.schema.return_value.as_arrow.return_value.names = ["a", "b"]
 
         db = self._create_db_sync()
         loader = FastSyncIcebergLoader(db, self.s3_info)
-        loader._sync_iceberg_table_schema(mock_table, source_schema)
+        loader._sync_iceberg_table(mock_table, "my-bucket/fast_sync/export/path/data.parquet")
 
         mock_table.transaction.assert_called_once()
         mock_txt.update_schema.assert_called_once()
@@ -249,20 +254,12 @@ class TestFastSyncIcebergLoader:
         db = self._create_db_sync()
         loader = FastSyncIcebergLoader(db, self.s3_info)
 
-        with patch.object(
-            loader, "_sync_iceberg_table_schema"
-        ) as mock_sync_schema, patch.object(
-            loader, "_sync_iceberg_table_data"
-        ) as mock_sync_data:
+        with patch.object(loader, "_sync_iceberg_table") as mock_sync:
             loader.load_from_s3()
 
-        mock_sync_schema.assert_called_once()
-        assert mock_sync_schema.call_args[0][0] is mock_table
-        assert mock_sync_schema.call_args[0][1] == mock_read_schema.return_value
-
-        mock_sync_data.assert_called_once()
-        assert mock_sync_data.call_args[0][0] is mock_table
-        assert mock_sync_data.call_args[0][1] == "my-bucket/fast_sync/export/path/data.parquet"
+        mock_sync.assert_called_once_with(
+            mock_table, "my-bucket/fast_sync/export/path/data.parquet"
+        )
 
     @patch(
         "target_redshift.fast_sync.iceberg.iceberg_loader.pq.read_schema",
@@ -291,18 +288,13 @@ class TestFastSyncIcebergLoader:
         db = self._create_db_sync()
         loader = FastSyncIcebergLoader(db, s3_info_multi)
 
-        with patch.object(
-            loader, "_sync_iceberg_table_schema"
-        ) as mock_sync_schema, patch.object(
-            loader, "_sync_iceberg_table_data"
-        ) as mock_sync_data:
+        with patch.object(loader, "_sync_iceberg_table") as mock_sync:
             loader.load_from_s3()
 
-        assert mock_sync_schema.call_count == 2
-        assert mock_sync_data.call_count == 2
-        assert mock_sync_data.call_args_list[0][0][1] == (
+        assert mock_sync.call_count == 2
+        assert mock_sync.call_args_list[0][0][1] == (
             "my-bucket/fast_sync/export/path/data.parquet_part1"
         )
-        assert mock_sync_data.call_args_list[1][0][1] == (
+        assert mock_sync.call_args_list[1][0][1] == (
             "my-bucket/fast_sync/export/path/data.parquet_part2"
         )
