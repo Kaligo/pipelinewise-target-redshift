@@ -4,11 +4,12 @@ Fast Sync Loader for target-redshift
 This module handles loading data from S3 into Redshift using the fast sync strategy.
 It extracts data loading logic from DbSync to provide a cleaner separation of concerns.
 """
-
+import base64
 import json
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 import psycopg2.extras
+import pyarrow as pa
 
 from target_redshift.db_sync import safe_column_name
 
@@ -26,10 +27,21 @@ class FastSyncS3Info:
     rows_uploaded: int = 0
     bytes_uploaded: int = 0
     time_extracted: str = ""
+    pyarrow_schema: Optional[pa.Schema] = None
 
     @classmethod
     def from_message(cls, message: Dict[str, Any]) -> "FastSyncS3Info":
         """Create FastSyncS3Info from a message dictionary."""
+
+        pyarrow_schema = None
+        if "pyarrow_schema" in message:
+            # Convert base64-encoded serialized PyArrow schema back to PyArrow schema
+            # The schema is stored as base64-encoded serialized bytes in the message
+            schema_data = message["pyarrow_schema"]
+            # Decode base64 string to bytes and deserialize to PyArrow schema
+            schema_bytes = base64.b64decode(schema_data.encode('utf-8'))
+            pyarrow_schema = pa.ipc.read_schema(pa.py_buffer(schema_bytes))
+
         return cls(
             s3_bucket=message["s3_bucket"],
             s3_path=message["s3_path"],
@@ -40,6 +52,7 @@ class FastSyncS3Info:
             rows_uploaded=message.get("rows_uploaded", 0),
             bytes_uploaded=message.get("bytes_uploaded", 0),
             time_extracted=message.get("time_extracted", ""),
+            pyarrow_schema=pyarrow_schema,
         )
 
 

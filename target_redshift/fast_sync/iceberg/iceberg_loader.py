@@ -1,8 +1,7 @@
-from functools import cached_property, lru_cache
+from typing import List
+from functools import cached_property
 
 import pyarrow as pa
-import pyarrow.parquet as pq
-import pyarrow.fs as fs
 from pyiceberg.catalog import load_catalog, Catalog
 from pyiceberg.table import Table
 from pyiceberg.table.sorting import NullOrder
@@ -29,13 +28,14 @@ class FastSyncIcebergLoader:
         self.stream = db_sync.stream_schema_message["stream"]
         self.catalog_name = db_sync.connection_config.get("iceberg_catalog_name")
         self.iceberg_namespace = self.connection_config.get("iceberg_namespace")
+        self.iceberg_s3_prefix = self.connection_config.get("iceberg_s3_prefix")
+        self.source_schema = stream_s3_info.pyarrow_schema
         # Make it simpler for now, just one partition column
         self.partition_column = "_sdc_batched_at"
         self.s3_region = stream_s3_info.s3_region
         self.s3_bucket = stream_s3_info.s3_bucket
         self.s3_key = stream_s3_info.s3_path
         self.number_of_files = stream_s3_info.files_uploaded
-        self._load_source_schema = lru_cache(self._load_source_schema)
 
     @property
     def iceberg_table(self) -> str:
@@ -55,7 +55,7 @@ class FastSyncIcebergLoader:
     @property
     def iceberg_table_location(self) -> str:
         """S3 URI where the Iceberg table data is stored."""
-        return f"s3://{self.s3_bucket}/iceberg/{self.iceberg_namespace}/{self.iceberg_table}"
+        return f"s3://{self.s3_bucket}/{self.iceberg_s3_prefix}/{self.iceberg_namespace}/{self.iceberg_table}"
 
     def _iterate_source_s3_path(self):
         for part_num in range(1, self.number_of_files + 1):
@@ -64,22 +64,21 @@ class FastSyncIcebergLoader:
             else:
                 yield self.source_s3_path
 
-    def _sync_iceberg_table(self, table: Table, s3_file_path: str):
+    def _sync_iceberg_table(self, table: Table, s3_file_paths: List[str]):
         """
         Sync the iceberg table schema and data from the source S3 path
         """
-        source_schema = self._load_source_schema(s3_file_path)
-        to_delete = set(source_schema.names) - set(table.schema().as_arrow().names)
+        to_delete = set(table.schema().as_arrow().names) - set(self.source_schema.names) 
 
         with table.transaction() as txt:
             with txt.update_schema() as update:
-                update.union_by_name(source_schema)
+                update.union_by_name(self.source_schema)
 
                 for column_name in to_delete:
                     update.delete_column(column_name)
             txt.add_files(
                 # s3_file_path is bucket/key (from _iterate_source_s3_path); add_files expects a full s3:// URI, so we prepend the prefix.
-                file_paths=[f"s3://{s3_file_path}"],
+                file_paths=[f"s3://{s3_file_path}" for s3_file_path in s3_file_paths],
                 check_duplicate_files=True,
             )
 
@@ -100,21 +99,6 @@ class FastSyncIcebergLoader:
         iceberg_catalog = load_catalog(self.catalog_name, **catalog_props)
         iceberg_catalog.create_namespace_if_not_exists(self.iceberg_namespace)
         return iceberg_catalog
-
-    def _load_source_schema(self, s3_file_path: str) -> pa.Schema:
-        """
-        Get the source schema from the source S3 path
-        """
-        return pq.read_schema(
-            # s3_file_path must be bucket/key (no s3://); PyArrow S3FileSystem rejects URIs.
-            s3_file_path,
-            filesystem=fs.S3FileSystem(
-                region=self.s3_region,
-                access_key=self.connection_config.get("aws_access_key_id"),
-                secret_key=self.connection_config.get("aws_secret_access_key"),
-                session_token=self.connection_config.get("aws_session_token"),
-            ),
-        )
 
     def _load_iceberg_table(self, schema: pa.Schema) -> Table:
         """
@@ -150,9 +134,6 @@ class FastSyncIcebergLoader:
         Load the iceberg table data from the source S3 path
         """
         file_paths = list(self._iterate_source_s3_path())
-        iceberg_table = self._load_iceberg_table(
-            self._load_source_schema(file_paths[0])
-        )
-        for s3_file_path in file_paths:
-            self.logger.info("Loading iceberg table data from %s", s3_file_path)
-            self._sync_iceberg_table(iceberg_table, s3_file_path)
+        iceberg_table = self._load_iceberg_table(self.source_schema)
+        self.logger.info("Loading iceberg table data from %s", ", ".join(file_paths))
+        self._sync_iceberg_table(iceberg_table, file_paths)
