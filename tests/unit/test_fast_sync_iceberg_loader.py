@@ -79,7 +79,7 @@ class TestFastSyncIcebergLoader:
         assert loader.source_s3_path == "my-bucket/fast_sync/export/path/data.parquet"
         assert (
             loader.iceberg_table_location
-            == "s3://my-bucket/iceberg/my_iceberg_db/test_schema_test_table"
+            == "s3://my-bucket/iceberg/test_schema-test_table"
         )
 
     @patch("target_redshift.fast_sync.iceberg.iceberg_loader.load_catalog")
@@ -104,9 +104,7 @@ class TestFastSyncIcebergLoader:
         mock_catalog.create_table.assert_called_once()
         call_kw = mock_catalog.create_table.call_args[1]
         assert call_kw["identifier"] == "my_iceberg_db.test_schema_test_table"
-        assert call_kw["location"] == (
-            "s3://my-bucket/iceberg/my_iceberg_db/test_schema_test_table"
-        )
+        assert call_kw["location"] == "s3://my-bucket/iceberg/test_schema-test_table"
 
     @patch("target_redshift.fast_sync.iceberg.iceberg_loader.load_catalog")
     def test_load_from_s3_existing_table_loads_and_syncs(self, mock_load_catalog):

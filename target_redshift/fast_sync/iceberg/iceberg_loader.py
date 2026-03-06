@@ -55,7 +55,7 @@ class FastSyncIcebergLoader:
     @property
     def iceberg_table_location(self) -> str:
         """S3 URI where the Iceberg table data is stored."""
-        return f"s3://{self.s3_bucket}/{self.iceberg_s3_prefix}/{self.iceberg_namespace}/{self.iceberg_table}"
+        return f"s3://{self.s3_bucket}/{self.iceberg_s3_prefix}/{self.stream}"
 
     def _iterate_source_s3_path(self):
         for part_num in range(1, self.number_of_files + 1):
