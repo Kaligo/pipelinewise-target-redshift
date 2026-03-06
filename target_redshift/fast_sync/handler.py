@@ -40,9 +40,8 @@ def validate_and_extract_message(
     # Required fields for fast_sync_s3_info (embedded in STATE message)
     required_fields = [
         "s3_bucket",
-        "s3_path",
+        "s3_paths",
         "s3_region",
-        "files_uploaded",
         "replication_method",
     ]
     missing_fields = [field for field in required_fields if field not in message]
@@ -119,7 +118,7 @@ def load_from_s3(
             FAST_SYNC_S3_INFO_KEY,
             stream,
             s3_info.s3_bucket,
-            s3_info.s3_path,
+            s3_info.base_s3_path,
         )
         if iceberg_enabled:
             LOGGER.info("Loading to iceberg for stream %s", stream)

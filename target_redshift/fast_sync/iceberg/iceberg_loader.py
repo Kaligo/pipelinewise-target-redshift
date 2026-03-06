@@ -34,8 +34,7 @@ class FastSyncIcebergLoader:
         self.partition_column = "_sdc_batched_at"
         self.s3_region = stream_s3_info.s3_region
         self.s3_bucket = stream_s3_info.s3_bucket
-        self.s3_key = stream_s3_info.s3_path
-        self.number_of_files = stream_s3_info.files_uploaded
+        self.s3_keys = stream_s3_info.s3_paths
 
     @property
     def iceberg_table(self) -> str:
@@ -48,27 +47,24 @@ class FastSyncIcebergLoader:
         return f"{self.iceberg_namespace}.{self.iceberg_table}"
 
     @property
-    def source_s3_path(self) -> str:
-        """Full S3 path to the source data files (bucket/key prefix, no s3:// scheme)."""
-        return f"{self.s3_bucket}/{self.s3_key}"
-
-    @property
     def iceberg_table_location(self) -> str:
         """S3 URI where the Iceberg table data is stored."""
         return f"s3://{self.s3_bucket}/{self.iceberg_s3_prefix}/{self.stream}"
 
-    def _iterate_source_s3_path(self):
-        for part_num in range(1, self.number_of_files + 1):
-            if self.number_of_files > 1:
-                yield f"{self.source_s3_path}_part{part_num}"
-            else:
-                yield self.source_s3_path
+    @property
+    def source_s3_paths(self) -> List[str]:
+        """List of all S3 paths to the source data files."""
+        return [self._source_s3_path(s3_key) for s3_key in self.s3_keys]
+
+    def _source_s3_path(self, s3_key) -> str:
+        """Full S3 path to the source data files (bucket/key prefix, no s3:// scheme)."""
+        return f"{self.s3_bucket}/{s3_key}"
 
     def _sync_iceberg_table(self, table: Table, s3_file_paths: List[str]):
         """
         Sync the iceberg table schema and data from the source S3 path
         """
-        to_delete = set(table.schema().as_arrow().names) - set(self.source_schema.names) 
+        to_delete = set(table.schema().as_arrow().names) - set(self.source_schema.names)
 
         with table.transaction() as txt:
             with txt.update_schema() as update:
@@ -77,7 +73,7 @@ class FastSyncIcebergLoader:
                 for column_name in to_delete:
                     update.delete_column(column_name)
             txt.add_files(
-                # s3_file_path is bucket/key (from _iterate_source_s3_path); add_files expects a full s3:// URI, so we prepend the prefix.
+                # s3_file_path is bucket/key (from source_s3_paths); add_files expects a full s3:// URI, so we prepend the prefix.
                 file_paths=[f"s3://{s3_file_path}" for s3_file_path in s3_file_paths],
                 check_duplicate_files=True,
             )
@@ -133,7 +129,7 @@ class FastSyncIcebergLoader:
         """
         Load the iceberg table data from the source S3 path
         """
-        file_paths = list(self._iterate_source_s3_path())
+        file_paths = self.source_s3_paths
         iceberg_table = self._load_iceberg_table(self.source_schema)
         self.logger.info("Loading iceberg table data from %s", ", ".join(file_paths))
         self._sync_iceberg_table(iceberg_table, file_paths)

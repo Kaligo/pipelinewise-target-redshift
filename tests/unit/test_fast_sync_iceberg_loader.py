@@ -3,7 +3,6 @@ Unit tests for Fast Sync Iceberg loader in target-redshift
 """
 
 import pyarrow as pa
-import pytest
 from unittest.mock import MagicMock, patch
 
 from target_redshift import db_sync
@@ -48,9 +47,8 @@ class TestFastSyncIcebergLoader:
         )
         self.s3_info = FastSyncS3Info(
             s3_bucket="my-bucket",
-            s3_path="fast_sync/export/path/data.parquet",
+            s3_paths=["fast_sync/export/path/data.parquet"],
             s3_region="us-east-1",
-            files_uploaded=1,
             replication_method="FULL_TABLE",
             file_format="parquet",
             rows_uploaded=100,
@@ -76,7 +74,7 @@ class TestFastSyncIcebergLoader:
         assert loader.partition_column == "_sdc_batched_at"
         assert loader.s3_region == "us-east-1"
         assert loader.s3_bucket == "my-bucket"
-        assert loader.source_s3_path == "my-bucket/fast_sync/export/path/data.parquet"
+        assert loader.source_s3_paths == ["my-bucket/fast_sync/export/path/data.parquet"]
         assert (
             loader.iceberg_table_location
             == "s3://my-bucket/iceberg/test_schema-test_table"
@@ -125,7 +123,7 @@ class TestFastSyncIcebergLoader:
         mock_catalog.create_table.assert_not_called()
 
     @patch("target_redshift.fast_sync.iceberg.iceberg_loader.load_catalog")
-    def testiceberg_catalog_caches_catalog(self, mock_load_catalog):
+    def test_iceberg_catalog_caches_catalog(self, mock_load_catalog):
         """Test iceberg_catalog is cached (load_catalog called once)"""
         mock_catalog = MagicMock()
         mock_load_catalog.return_value = mock_catalog
@@ -140,7 +138,7 @@ class TestFastSyncIcebergLoader:
         mock_load_catalog.assert_called_once()
 
     @patch("target_redshift.fast_sync.iceberg.iceberg_loader.load_catalog")
-    def testiceberg_catalog_passes_glue_properties(self, mock_load_catalog):
+    def test_iceberg_catalog_passes_glue_properties(self, mock_load_catalog):
         """Test iceberg_catalog passes Glue type and region to load_catalog"""
         mock_catalog = MagicMock()
         mock_load_catalog.return_value = mock_catalog
@@ -182,9 +180,8 @@ class TestFastSyncIcebergLoader:
         )
         s3_info = FastSyncS3Info(
             s3_bucket="my-bucket",
-            s3_path="fast_sync/export/path/data.parquet",
+            s3_paths=["fast_sync/export/path/data.parquet"],
             s3_region="us-east-1",
-            files_uploaded=1,
             replication_method="FULL_TABLE",
             file_format="parquet",
             rows_uploaded=100,
@@ -232,7 +229,7 @@ class TestFastSyncIcebergLoader:
     def test_load_from_s3_multiple_files_calls_sync_once_with_all_paths(
         self, mock_load_catalog
     ):
-        """Test load_from_s3 with files_uploaded=2 calls _sync_iceberg_table once with both part paths"""
+        """Test load_from_s3 with multiple s3_paths calls _sync_iceberg_table once with all part paths"""
         mock_catalog = MagicMock()
         mock_table = MagicMock()
         mock_catalog.table_exists.return_value = True
@@ -241,9 +238,11 @@ class TestFastSyncIcebergLoader:
 
         s3_info_multi = FastSyncS3Info(
             s3_bucket="my-bucket",
-            s3_path="fast_sync/export/path/data.parquet",
+            s3_paths=[
+                "fast_sync/export/path/data.parquet_part1",
+                "fast_sync/export/path/data.parquet_part2",
+            ],
             s3_region="us-east-1",
-            files_uploaded=2,
             replication_method="FULL_TABLE",
             file_format="parquet",
             rows_uploaded=200,

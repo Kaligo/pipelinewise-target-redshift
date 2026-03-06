@@ -44,9 +44,8 @@ class TestFastSyncHandler:
         """Helper to create a valid FAST_SYNC_RDS_S3_INFO message"""
         message = {
             "s3_bucket": "test-bucket",
-            "s3_path": "test/path/data.csv",
+            "s3_paths": ["test/path/data.csv"],
             "s3_region": "us-east-1",
-            "files_uploaded": 1,
             "replication_method": "FULL_TABLE",
         }
         message.update(overrides)
@@ -130,20 +129,14 @@ class TestFastSyncHandler:
             "s3_bucket", "missing required fields: s3_bucket"
         )
 
-    def test_validate_and_extract_message_missing_s3_path(self):
-        """Test validation fails when s3_path is missing"""
-        self._test_validate_missing_field("s3_path", "missing required fields: s3_path")
+    def test_validate_and_extract_message_missing_s3_paths(self):
+        """Test validation fails when s3_paths is missing"""
+        self._test_validate_missing_field("s3_paths", "missing required fields: s3_paths")
 
     def test_validate_and_extract_message_missing_s3_region(self):
         """Test validation fails when s3_region is missing"""
         self._test_validate_missing_field(
             "s3_region", "missing required fields: s3_region"
-        )
-
-    def test_validate_and_extract_message_missing_files_uploaded(self):
-        """Test validation fails when files_uploaded is missing"""
-        self._test_validate_missing_field(
-            "files_uploaded", "missing required fields: files_uploaded"
         )
 
     def test_validate_and_extract_message_missing_replication_method(self):
@@ -156,7 +149,7 @@ class TestFastSyncHandler:
         """Test validation fails when multiple required fields are missing"""
         message = {
             "s3_bucket": "test-bucket"
-            # Missing: s3_path, s3_region, files_uploaded, replication_method
+            # Missing: s3_paths, s3_region, replication_method
             # Note: rows_uploaded is optional
         }
         stream_id = "test_schema-test_table"
@@ -185,10 +178,9 @@ class TestFastSyncHandler:
         s3_info = call_args[0]
         assert isinstance(s3_info, FastSyncS3Info)
         assert s3_info.s3_bucket == "test-bucket"
-        assert s3_info.s3_path == "test/path/data.csv"
+        assert s3_info.s3_paths == ["test/path/data.csv"]
         assert s3_info.s3_region == "us-east-1"
         assert s3_info.rows_uploaded == 100
-        assert s3_info.files_uploaded == 1
         assert s3_info.replication_method == "FULL_TABLE"
 
     @patch("target_redshift.fast_sync.handler.FastSyncLoader")
@@ -214,7 +206,7 @@ class TestFastSyncHandler:
         mock_loader = self._create_mock_loader(mock_loader_class)
 
         db = MagicMock()
-        message = self._create_valid_message(s3_region="us-west-2", files_uploaded=2)
+        message = self._create_valid_message(s3_region="us-west-2")
 
         fast_sync_handler.load_from_s3(
             "test_stream", message, db, iceberg_enabled=False
@@ -227,10 +219,9 @@ class TestFastSyncHandler:
         s3_info = call_args[0]
         assert isinstance(s3_info, FastSyncS3Info)
         assert s3_info.s3_bucket == "test-bucket"
-        assert s3_info.s3_path == "test/path/data.csv"
+        assert s3_info.s3_paths == ["test/path/data.csv"]
         assert s3_info.s3_region == "us-west-2"
         assert s3_info.rows_uploaded == 0  # Default value when not provided
-        assert s3_info.files_uploaded == 2
         assert s3_info.replication_method == "FULL_TABLE"
 
     @patch("target_redshift.fast_sync.handler.FastSyncIcebergLoader")
@@ -251,7 +242,7 @@ class TestFastSyncHandler:
         assert call_args[0] is db
         assert isinstance(call_args[1], FastSyncS3Info)
         assert call_args[1].s3_bucket == "test-bucket"
-        assert call_args[1].s3_path == "test/path/data.csv"
+        assert call_args[1].s3_paths == ["test/path/data.csv"]
         assert call_args[1].rows_uploaded == 50
         mock_iceberg_loader.load_from_s3.assert_called_once_with()
 
@@ -297,9 +288,8 @@ class TestFastSyncHandler:
         """Test extract_operations_from_state with single fast_sync_s3_info"""
         s3_info = {
             "s3_bucket": "test-bucket",
-            "s3_path": "test/path/data.csv",
+            "s3_paths": ["test/path/data.csv"],
             "s3_region": "us-east-1",
-            "files_uploaded": 1,
             "replication_method": "FULL_TABLE",
             "rows_uploaded": 100,
         }
