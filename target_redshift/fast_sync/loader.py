@@ -27,6 +27,7 @@ class FastSyncS3Info:
     bytes_uploaded: int = 0
     time_extracted: str = ""
     pyarrow_schema: Optional[pa.Schema] = None
+    partition_column: Optional[str] = None
 
     @classmethod
     def from_message(cls, message: Dict[str, Any]) -> "FastSyncS3Info":
@@ -51,6 +52,7 @@ class FastSyncS3Info:
             bytes_uploaded=message.get("bytes_uploaded", 0),
             time_extracted=message.get("time_extracted", ""),
             pyarrow_schema=pyarrow_schema,
+            partition_column=message.get("partition_column"),
         )
 
     @property

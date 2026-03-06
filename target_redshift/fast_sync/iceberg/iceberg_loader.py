@@ -31,7 +31,7 @@ class FastSyncIcebergLoader:
         self.iceberg_s3_prefix = self.connection_config.get("iceberg_s3_prefix")
         self.source_schema = stream_s3_info.pyarrow_schema
         # Make it simpler for now, just one partition column
-        self.partition_column = "_sdc_batched_at"
+        self.partition_column = stream_s3_info.partition_column or "_sdc_batched_at"
         self.s3_region = stream_s3_info.s3_region
         self.s3_bucket = stream_s3_info.s3_bucket
         self.s3_keys = stream_s3_info.s3_paths

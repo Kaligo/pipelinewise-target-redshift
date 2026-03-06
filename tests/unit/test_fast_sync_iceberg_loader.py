@@ -80,6 +80,22 @@ class TestFastSyncIcebergLoader:
             == "s3://my-bucket/iceberg/test_schema-test_table"
         )
 
+    def test_init_uses_partition_column_from_s3_info_when_provided(self):
+        """When FastSyncS3Info has partition_column set, loader uses it."""
+        s3_info_with_partition = FastSyncS3Info(
+            s3_bucket="my-bucket",
+            s3_paths=["fast_sync/export/path/data.parquet"],
+            s3_region="us-east-1",
+            replication_method="FULL_TABLE",
+            file_format="parquet",
+            rows_uploaded=100,
+            pyarrow_schema=self.source_schema,
+            partition_column="custom_ts",
+        )
+        db = self._create_db_sync()
+        loader = FastSyncIcebergLoader(db, s3_info_with_partition)
+        assert loader.partition_column == "custom_ts"
+
     @patch("target_redshift.fast_sync.iceberg.iceberg_loader.load_catalog")
     def test_load_from_s3_creates_table_and_adds_files(self, mock_load_catalog):
         """Test load_from_s3 when table does not exist: create table, sync schema, add_files"""
