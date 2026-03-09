@@ -238,12 +238,15 @@ class TestFastSyncHandler:
         )
 
         mock_iceberg_class.assert_called_once()
-        call_args = mock_iceberg_class.call_args[0]
-        assert call_args[0] is db
-        assert isinstance(call_args[1], FastSyncS3Info)
-        assert call_args[1].s3_bucket == "test-bucket"
-        assert call_args[1].s3_paths == ["test/path/data.csv"]
-        assert call_args[1].rows_uploaded == 50
+        call_kwargs = mock_iceberg_class.call_args[1]
+        assert call_kwargs["logger"] is db.logger
+        assert call_kwargs["stream"] == db.stream_schema_message["stream"]
+        assert call_kwargs["connection_config"] is db.connection_config
+        s3_info = call_kwargs["stream_s3_info"]
+        assert isinstance(s3_info, FastSyncS3Info)
+        assert s3_info.s3_bucket == "test-bucket"
+        assert s3_info.s3_paths == ["test/path/data.csv"]
+        assert s3_info.rows_uploaded == 50
         mock_iceberg_loader.load_from_s3.assert_called_once_with()
 
     def test_flush_operations_empty_queue(self):

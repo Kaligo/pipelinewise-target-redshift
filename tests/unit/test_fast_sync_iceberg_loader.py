@@ -73,8 +73,7 @@ class TestFastSyncIcebergLoader:
             pyarrow_schema=self.source_schema,
             partition_column="custom_ts",
         )
-        db = self._create_db_sync()
-        loader = FastSyncIcebergLoader(db, s3_info_with_partition)
+        loader = self._create_loader(s3_info=s3_info_with_partition)
         assert loader.partition_column == "custom_ts"
 
     @patch("target_redshift.fast_sync.iceberg.iceberg_loader.load_catalog")
