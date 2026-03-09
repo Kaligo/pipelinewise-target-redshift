@@ -1,5 +1,6 @@
-from typing import List
+from typing import Any, Dict, List
 from functools import cached_property
+import logging
 
 import pyarrow as pa
 from pyiceberg.catalog import load_catalog, Catalog
@@ -8,13 +9,14 @@ from pyiceberg.table.sorting import NullOrder
 from pyiceberg.transforms import DayTransform, IdentityTransform
 
 from target_redshift.fast_sync.loader import FastSyncS3Info
-from target_redshift.db_sync import DbSync
 
 
 class FastSyncIcebergLoader:
     def __init__(
         self,
-        db_sync: DbSync,
+        logger: logging.Logger,
+        stream: str,
+        connection_config: Dict[str, Any],
         stream_s3_info: FastSyncS3Info,
     ):
 
@@ -23,12 +25,12 @@ class FastSyncIcebergLoader:
                 f"Unsupported file format: {stream_s3_info.file_format}. Should be one of: parquet, orc, avro"
             )
 
-        self.logger = db_sync.logger
-        self.connection_config = db_sync.connection_config
-        self.stream = db_sync.stream_schema_message["stream"]
-        self.catalog_name = db_sync.connection_config.get("iceberg_catalog_name")
-        self.iceberg_namespace = self.connection_config.get("iceberg_namespace")
-        self.iceberg_s3_prefix = self.connection_config.get("iceberg_s3_prefix")
+        self.logger = logger
+        self.stream = stream
+        self.connection_config = connection_config
+        self.catalog_name = connection_config.get("iceberg_catalog_name")
+        self.iceberg_namespace = connection_config.get("iceberg_namespace")
+        self.iceberg_s3_prefix = connection_config.get("iceberg_s3_prefix")
         self.source_schema = stream_s3_info.pyarrow_schema
         # Make it simpler for now, just one partition column
         self.partition_column = stream_s3_info.partition_column or "_sdc_batched_at"
@@ -87,9 +89,7 @@ class FastSyncIcebergLoader:
             "type": "glue",
             "client.region": self.s3_region,
             "client.access-key-id": self.connection_config.get("aws_access_key_id"),
-            "client.secret-access-key": self.connection_config.get(
-                "aws_secret_access_key"
-            ),
+            "client.secret-access-key": self.connection_config.get("aws_secret_access_key"),
             "client.session-token": self.connection_config.get("aws_session_token"),
         }
         iceberg_catalog = load_catalog(self.catalog_name, **catalog_props)

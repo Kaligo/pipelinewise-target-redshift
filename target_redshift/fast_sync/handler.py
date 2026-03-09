@@ -122,7 +122,12 @@ def load_from_s3(
         )
         if iceberg_enabled:
             LOGGER.info("Loading to iceberg for stream %s", stream)
-            loader = FastSyncIcebergLoader(db_sync, s3_info)
+            loader = FastSyncIcebergLoader(
+                logger=db_sync.logger,
+                stream=db_sync.stream_schema_message["stream"],
+                connection_config=db_sync.connection_config,
+                stream_s3_info=s3_info,
+            )
             loader.load_from_s3()
         else:
             loader = FastSyncLoader(db_sync)
