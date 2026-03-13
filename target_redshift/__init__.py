@@ -95,7 +95,9 @@ def emit_state(state):
         sys.stdout.flush()
 
 
-def flush_fast_sync_queue(fast_sync_queue, stream_to_sync, config, flushed_state=None):  # pylint: disable=too-many-arguments
+def flush_fast_sync_queue(
+    fast_sync_queue, stream_to_sync, config, flushed_state=None
+):  # pylint: disable=too-many-arguments
     """Flush queued fast sync operations with parallelism from config and clear the queue.
 
     Optionally cleans up fast_sync_s3_info from flushed_state bookmarks for processed streams.
@@ -111,8 +113,9 @@ def flush_fast_sync_queue(fast_sync_queue, stream_to_sync, config, flushed_state
 
     parallelism = config.get("parallelism", DEFAULT_PARALLELISM)
     max_parallelism = config.get("max_parallelism", DEFAULT_MAX_PARALLELISM)
+    iceberg_enabled = config.get("iceberg_enabled", False)
     fast_sync_handler.flush_operations(
-        fast_sync_queue, stream_to_sync, parallelism, max_parallelism
+        fast_sync_queue, stream_to_sync, parallelism, max_parallelism, iceberg_enabled
     )
 
     # Clean up fast_sync_s3_info from flushed_state if provided
@@ -163,7 +166,9 @@ def persist_lines(config, lines, table_cache=None) -> None:
     row_count = {}
     stream_to_sync = {}
     total_row_count = {}
-    fast_sync_queue = {}  # Queue for fast_sync_s3_info operations (extracted from STATE messages) to process in parallel
+    fast_sync_queue = (
+        {}
+    )  # Queue for fast_sync_s3_info operations (extracted from STATE messages) to process in parallel
     batch_size_rows = config.get("batch_size_rows", DEFAULT_BATCH_SIZE_ROWS)
 
     # Loop over lines from stdin

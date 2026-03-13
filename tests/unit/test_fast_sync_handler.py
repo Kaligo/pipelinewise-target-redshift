@@ -44,9 +44,8 @@ class TestFastSyncHandler:
         """Helper to create a valid FAST_SYNC_RDS_S3_INFO message"""
         message = {
             "s3_bucket": "test-bucket",
-            "s3_path": "test/path/data.csv",
+            "s3_paths": ["test/path/data.csv"],
             "s3_region": "us-east-1",
-            "files_uploaded": 1,
             "replication_method": "FULL_TABLE",
         }
         message.update(overrides)
@@ -130,20 +129,14 @@ class TestFastSyncHandler:
             "s3_bucket", "missing required fields: s3_bucket"
         )
 
-    def test_validate_and_extract_message_missing_s3_path(self):
-        """Test validation fails when s3_path is missing"""
-        self._test_validate_missing_field("s3_path", "missing required fields: s3_path")
+    def test_validate_and_extract_message_missing_s3_paths(self):
+        """Test validation fails when s3_paths is missing"""
+        self._test_validate_missing_field("s3_paths", "missing required fields: s3_paths")
 
     def test_validate_and_extract_message_missing_s3_region(self):
         """Test validation fails when s3_region is missing"""
         self._test_validate_missing_field(
             "s3_region", "missing required fields: s3_region"
-        )
-
-    def test_validate_and_extract_message_missing_files_uploaded(self):
-        """Test validation fails when files_uploaded is missing"""
-        self._test_validate_missing_field(
-            "files_uploaded", "missing required fields: files_uploaded"
         )
 
     def test_validate_and_extract_message_missing_replication_method(self):
@@ -156,7 +149,7 @@ class TestFastSyncHandler:
         """Test validation fails when multiple required fields are missing"""
         message = {
             "s3_bucket": "test-bucket"
-            # Missing: s3_path, s3_region, files_uploaded, replication_method
+            # Missing: s3_paths, s3_region, replication_method
             # Note: rows_uploaded is optional
         }
         stream_id = "test_schema-test_table"
@@ -175,7 +168,7 @@ class TestFastSyncHandler:
         db = MagicMock()
         message = self._create_valid_message(rows_uploaded=100)
 
-        fast_sync_handler.load_from_s3("test_stream", message, db)
+        fast_sync_handler.load_from_s3("test_stream", message, db, iceberg_enabled=False)
 
         mock_loader_class.assert_called_once_with(db)
         # Verify load_from_s3 was called with FastSyncS3Info dataclass
@@ -185,10 +178,9 @@ class TestFastSyncHandler:
         s3_info = call_args[0]
         assert isinstance(s3_info, FastSyncS3Info)
         assert s3_info.s3_bucket == "test-bucket"
-        assert s3_info.s3_path == "test/path/data.csv"
+        assert s3_info.s3_paths == ["test/path/data.csv"]
         assert s3_info.s3_region == "us-east-1"
         assert s3_info.rows_uploaded == 100
-        assert s3_info.files_uploaded == 1
         assert s3_info.replication_method == "FULL_TABLE"
 
     @patch("target_redshift.fast_sync.handler.FastSyncLoader")
@@ -201,7 +193,9 @@ class TestFastSyncHandler:
         message = self._create_valid_message(replication_method="INCREMENTAL")
 
         with pytest.raises(Exception, match="Load failed"):
-            fast_sync_handler.load_from_s3("test_stream", message, db)
+            fast_sync_handler.load_from_s3(
+                "test_stream", message, db, iceberg_enabled=False
+            )
 
         # Verify load_from_s3 was called
         mock_loader.load_from_s3.assert_called_once()
@@ -212,9 +206,11 @@ class TestFastSyncHandler:
         mock_loader = self._create_mock_loader(mock_loader_class)
 
         db = MagicMock()
-        message = self._create_valid_message(s3_region="us-west-2", files_uploaded=2)
+        message = self._create_valid_message(s3_region="us-west-2")
 
-        fast_sync_handler.load_from_s3("test_stream", message, db)
+        fast_sync_handler.load_from_s3(
+            "test_stream", message, db, iceberg_enabled=False
+        )
 
         # Verify load_from_s3 was called with FastSyncS3Info dataclass
         assert mock_loader.load_from_s3.call_count == 1
@@ -223,16 +219,40 @@ class TestFastSyncHandler:
         s3_info = call_args[0]
         assert isinstance(s3_info, FastSyncS3Info)
         assert s3_info.s3_bucket == "test-bucket"
-        assert s3_info.s3_path == "test/path/data.csv"
+        assert s3_info.s3_paths == ["test/path/data.csv"]
         assert s3_info.s3_region == "us-west-2"
         assert s3_info.rows_uploaded == 0  # Default value when not provided
-        assert s3_info.files_uploaded == 2
         assert s3_info.replication_method == "FULL_TABLE"
+
+    @patch("target_redshift.fast_sync.handler.FastSyncIcebergLoader")
+    def test_load_from_s3_iceberg_enabled_uses_iceberg_loader(self, mock_iceberg_class):
+        """Test that when iceberg_enabled=True, FastSyncIcebergLoader is used"""
+        mock_iceberg_loader = MagicMock()
+        mock_iceberg_class.return_value = mock_iceberg_loader
+
+        db = MagicMock()
+        message = self._create_valid_message(rows_uploaded=50)
+
+        fast_sync_handler.load_from_s3(
+            "test_schema-test_table", message, db, iceberg_enabled=True
+        )
+
+        mock_iceberg_class.assert_called_once()
+        call_kwargs = mock_iceberg_class.call_args[1]
+        assert call_kwargs["logger"] is db.logger
+        assert call_kwargs["stream"] == db.stream_schema_message["stream"]
+        assert call_kwargs["connection_config"] is db.connection_config
+        s3_info = call_kwargs["stream_s3_info"]
+        assert isinstance(s3_info, FastSyncS3Info)
+        assert s3_info.s3_bucket == "test-bucket"
+        assert s3_info.s3_paths == ["test/path/data.csv"]
+        assert s3_info.rows_uploaded == 50
+        mock_iceberg_loader.load_from_s3.assert_called_once_with()
 
     def test_flush_operations_empty_queue(self):
         """Test flush_operations with empty queue"""
         # Should return early without any processing
-        fast_sync_handler.flush_operations({}, {}, 4, 16)
+        fast_sync_handler.flush_operations({}, {}, 4, 16, False)
 
     @patch("target_redshift.fast_sync.handler.Parallel")
     def test_flush_operations_with_parallelism(self, mock_parallel_class):
@@ -242,7 +262,9 @@ class TestFastSyncHandler:
 
         fast_sync_queue, stream_to_sync = self._create_fast_sync_queue_and_streams(2)
 
-        fast_sync_handler.flush_operations(fast_sync_queue, stream_to_sync, 2, 16)
+        fast_sync_handler.flush_operations(
+            fast_sync_queue, stream_to_sync, 2, 16, iceberg_enabled=False
+        )
 
         # Verify Parallel was instantiated and called
         mock_parallel_class.assert_called_once()
@@ -255,7 +277,9 @@ class TestFastSyncHandler:
         fast_sync_queue, stream_to_sync = self._create_fast_sync_queue_and_streams(3)
 
         # parallelism=0 should use min(n_streams, max_parallelism)
-        fast_sync_handler.flush_operations(fast_sync_queue, stream_to_sync, 0, 2)
+        fast_sync_handler.flush_operations(
+            fast_sync_queue, stream_to_sync, 0, 2, iceberg_enabled=False
+        )
 
         # Verify parallel processing was invoked
         mock_parallel.assert_called_once()
@@ -267,9 +291,8 @@ class TestFastSyncHandler:
         """Test extract_operations_from_state with single fast_sync_s3_info"""
         s3_info = {
             "s3_bucket": "test-bucket",
-            "s3_path": "test/path/data.csv",
+            "s3_paths": ["test/path/data.csv"],
             "s3_region": "us-east-1",
-            "files_uploaded": 1,
             "replication_method": "FULL_TABLE",
             "rows_uploaded": 100,
         }

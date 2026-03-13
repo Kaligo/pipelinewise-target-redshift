@@ -53,9 +53,8 @@ class TestTargetRedshift:
         """Helper to create fast_sync_s3_info dictionary"""
         s3_info = {
             "s3_bucket": "test-bucket",
-            "s3_path": "test/path/data.csv",
+            "s3_paths": ["test/path/data.csv"],
             "s3_region": "us-east-1",
-            "files_uploaded": 1,
             "replication_method": "FULL_TABLE",
             "rows_uploaded": 100,
         }
@@ -178,19 +177,18 @@ class TestTargetRedshift:
         assert "test_schema-test_table" in operations
         operation = operations["test_schema-test_table"]
         assert operation["s3_bucket"] == "test-bucket"
-        assert operation["s3_path"] == "test/path/data.csv"
+        assert operation["s3_paths"] == ["test/path/data.csv"]
         assert operation["s3_region"] == "us-east-1"
-        assert operation["files_uploaded"] == 1
         assert operation["replication_method"] == "FULL_TABLE"
         assert operation["rows_uploaded"] == 100
 
     def test_extract_fast_sync_operations_from_state_multiple_operations(self):
         """Test extract_operations_from_state with multiple fast_sync_s3_info"""
         s3_info_1 = self._create_fast_sync_s3_info(
-            s3_path="test/path/data1.csv", rows_uploaded=100
+            s3_paths=["test/path/data1.csv"], rows_uploaded=100
         )
         s3_info_2 = self._create_fast_sync_s3_info(
-            s3_path="test/path/data2.csv",
+            s3_paths=["test/path/data2.csv"],
             rows_uploaded=200,
             replication_method="INCREMENTAL",
         )
@@ -294,9 +292,8 @@ class TestTargetRedshift:
         fast_sync_queue = {
             "test_schema-test_table": {
                 "s3_bucket": "test-bucket",
-                "s3_path": "test/path/data.csv",
+                "s3_paths": ["test/path/data.csv"],
                 "s3_region": "us-east-1",
-                "files_uploaded": 1,
                 "replication_method": "FULL_TABLE",
                 "rows_uploaded": 100,
             }
@@ -307,7 +304,7 @@ class TestTargetRedshift:
         target_redshift.flush_fast_sync_queue(fast_sync_queue, stream_to_sync, config)
 
         mock_flush_operations.assert_called_once_with(
-            fast_sync_queue, stream_to_sync, 2, 16
+            fast_sync_queue, stream_to_sync, 2, 16, False
         )
         assert fast_sync_queue == {}
 
@@ -317,9 +314,8 @@ class TestTargetRedshift:
         fast_sync_queue = {
             "test_schema-test_table": {
                 "s3_bucket": "test-bucket",
-                "s3_path": "test/path/data.csv",
+                "s3_paths": ["test/path/data.csv"],
                 "s3_region": "us-east-1",
-                "files_uploaded": 1,
                 "replication_method": "FULL_TABLE",
             }
         }
@@ -329,7 +325,7 @@ class TestTargetRedshift:
         target_redshift.flush_fast_sync_queue(fast_sync_queue, stream_to_sync, config)
 
         mock_flush_operations.assert_called_once_with(
-            fast_sync_queue, stream_to_sync, 0, 16
+            fast_sync_queue, stream_to_sync, 0, 16, False
         )
         assert fast_sync_queue == {}
 
@@ -340,14 +336,14 @@ class TestTargetRedshift:
                 "test_schema-test_table": {
                     "fast_sync_s3_info": {
                         "s3_bucket": "test-bucket",
-                        "s3_path": "test/path/data.csv",
+                        "s3_paths": ["test/path/data.csv"],
                     },
                     "other_bookmark": "value",
                 },
                 "test_schema-test_table2": {
                     "fast_sync_s3_info": {
                         "s3_bucket": "test-bucket",
-                        "s3_path": "test/path/data2.csv",
+                        "s3_paths": ["test/path/data2.csv"],
                     }
                 },
                 "test_schema-test_table3": {"other_bookmark": "value"},
@@ -419,9 +415,8 @@ class TestTargetRedshift:
                             "test_schema-test_table": {
                                 "fast_sync_s3_info": {
                                     "s3_bucket": "test-bucket",
-                                    "s3_path": "test/path/data.csv",
+                                    "s3_paths": ["test/path/data.csv"],
                                     "s3_region": "us-east-1",
-                                    "files_uploaded": 1,
                                     "replication_method": "FULL_TABLE",
                                     "rows_uploaded": 100,
                                 }

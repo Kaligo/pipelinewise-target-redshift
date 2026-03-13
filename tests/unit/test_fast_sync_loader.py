@@ -115,18 +115,16 @@ class TestFastSyncLoader:
     def _create_s3_info(
         self,
         s3_bucket="source-bucket",
-        s3_path="test/path/data.csv",
+        s3_paths=None,
         s3_region="us-east-1",
         rows_uploaded=100,
-        files_uploaded=1,
         replication_method=None,
     ) -> FastSyncS3Info:
         """Helper to create FastSyncS3Info for tests"""
         return FastSyncS3Info(
             s3_bucket=s3_bucket,
-            s3_path=s3_path,
+            s3_paths=s3_paths or ["test/path/data.csv"],
             s3_region=s3_region,
-            files_uploaded=files_uploaded,
             replication_method=replication_method or "FULL_TABLE",
             rows_uploaded=rows_uploaded,
         )
@@ -141,10 +139,8 @@ class TestFastSyncLoader:
 
         s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
-            s3_path="test/path/data.csv",
             s3_region="us-east-1",
             rows_uploaded=100,
-            files_uploaded=1,
         )
         loader.load_from_s3(s3_info)
 
@@ -173,10 +169,13 @@ class TestFastSyncLoader:
 
         s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
-            s3_path="test/path/data.csv",
+            s3_paths=[
+                "test/path/data.csv",
+                "test/path/data.csv_part2",
+                "test/path/data.csv_part3",
+            ],
             s3_region="us-east-1",
             rows_uploaded=1000,
-            files_uploaded=3,
         )
         loader.load_from_s3(s3_info)
 
@@ -201,10 +200,8 @@ class TestFastSyncLoader:
 
         s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
-            s3_path="test/path/data.csv",
             s3_region="us-east-1",
             rows_uploaded=100,
-            files_uploaded=1,
             replication_method="FULL_TABLE",
         )
         loader.load_from_s3(s3_info)
@@ -223,10 +220,8 @@ class TestFastSyncLoader:
 
         s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
-            s3_path="test/path/data.csv",
             s3_region="us-east-1",
             rows_uploaded=100,
-            files_uploaded=1,
         )
         loader.load_from_s3(s3_info)
 
@@ -259,10 +254,8 @@ class TestFastSyncLoader:
 
         s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
-            s3_path="test/path/data.csv",
             s3_region="us-east-1",
             rows_uploaded=100,
-            files_uploaded=1,
         )
         loader.load_from_s3(s3_info)
 
@@ -298,10 +291,8 @@ class TestFastSyncLoader:
         # Should not raise exception even if S3 cleanup fails
         s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
-            s3_path="test/path/data.csv",
             s3_region="us-east-1",
             rows_uploaded=100,
-            files_uploaded=1,
         )
         loader.load_from_s3(s3_info)
 
@@ -323,10 +314,8 @@ class TestFastSyncLoader:
 
         s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
-            s3_path="test/path/data.csv",
             s3_region="us-east-1",
             rows_uploaded=100,
-            files_uploaded=1,
         )
         loader.load_from_s3(s3_info)
 
@@ -350,10 +339,8 @@ class TestFastSyncLoader:
 
         s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
-            s3_path="test/path/data.csv",
             s3_region="us-east-1",
             rows_uploaded=100,
-            files_uploaded=1,
         )
         loader.load_from_s3(s3_info)
 
@@ -399,10 +386,8 @@ class TestFastSyncLoader:
 
         s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
-            s3_path="test/path/data.csv",
             s3_region="ap-southeast-1",
             rows_uploaded=10,
-            files_uploaded=1,
         )
         loader.load_from_s3(s3_info)
 
@@ -432,10 +417,8 @@ class TestFastSyncLoader:
 
         s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
-            s3_path="test/path/data.csv",
             s3_region="us-east-1",  # Different region, but should be ignored
             rows_uploaded=10,
-            files_uploaded=1,
         )
         loader.load_from_s3(s3_info)
 
@@ -464,10 +447,8 @@ class TestFastSyncLoader:
 
         s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
-            s3_path="test/path/data.csv",
             s3_region="us-east-1",
             rows_uploaded=100,
-            files_uploaded=1,
             replication_method="INCREMENTAL",
         )
         loader.load_from_s3(s3_info)
@@ -495,10 +476,8 @@ class TestFastSyncLoader:
 
         s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
-            s3_path="test/path/data.csv",
             s3_region="us-east-1",
             rows_uploaded=100,
-            files_uploaded=1,
             replication_method="FULL_TABLE",
         )
         loader.load_from_s3(s3_info)
@@ -542,10 +521,8 @@ class TestFastSyncLoader:
 
         s3_info = self._create_s3_info(
             s3_bucket="source-bucket",
-            s3_path="test/path/data.csv",
             s3_region="us-east-1",
             rows_uploaded=100,
-            files_uploaded=1,
             replication_method="FULL_TABLE",
         )
         loader.load_from_s3(s3_info)

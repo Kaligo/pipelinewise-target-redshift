@@ -8,6 +8,7 @@ from typing import Dict, Any, Iterable
 from joblib import Parallel, delayed, parallel_backend
 from singer import get_logger
 from target_redshift.fast_sync.loader import FastSyncLoader, FastSyncS3Info
+from target_redshift.fast_sync.iceberg.iceberg_loader import FastSyncIcebergLoader
 
 LOGGER = get_logger("target_redshift")
 
@@ -39,9 +40,8 @@ def validate_and_extract_message(
     # Required fields for fast_sync_s3_info (embedded in STATE message)
     required_fields = [
         "s3_bucket",
-        "s3_path",
+        "s3_paths",
         "s3_region",
-        "files_uploaded",
         "replication_method",
     ]
     missing_fields = [field for field in required_fields if field not in message]
@@ -107,7 +107,9 @@ def extract_operations_from_state(
     return operations
 
 
-def load_from_s3(stream: str, message: Dict[str, Any], db_sync: Any) -> None:
+def load_from_s3(
+    stream: str, message: Dict[str, Any], db_sync: Any, iceberg_enabled: bool
+) -> None:
     """Load data from S3 for a single stream (used for parallel processing)"""
     try:
         s3_info = FastSyncS3Info.from_message(message)
@@ -116,10 +118,20 @@ def load_from_s3(stream: str, message: Dict[str, Any], db_sync: Any) -> None:
             FAST_SYNC_S3_INFO_KEY,
             stream,
             s3_info.s3_bucket,
-            s3_info.s3_path,
+            s3_info.base_s3_path,
         )
-        loader = FastSyncLoader(db_sync)
-        loader.load_from_s3(s3_info)
+        if iceberg_enabled:
+            LOGGER.info("Loading to iceberg for stream %s", stream)
+            loader = FastSyncIcebergLoader(
+                logger=db_sync.logger,
+                stream=db_sync.stream_schema_message["stream"],
+                connection_config=db_sync.connection_config,
+                stream_s3_info=s3_info,
+            )
+            loader.load_from_s3()
+        else:
+            loader = FastSyncLoader(db_sync)
+            loader.load_from_s3(s3_info)
         LOGGER.info(
             "Successfully loaded %s rows from S3 for stream %s",
             s3_info.rows_uploaded,
@@ -135,6 +147,7 @@ def flush_operations(
     stream_to_sync: Dict[str, Any],
     parallelism: int,
     max_parallelism: int,
+    iceberg_enabled: bool,
 ) -> None:
     """Process queued fast_sync_s3_info operations in parallel"""
     if not fast_sync_queue:
@@ -152,7 +165,10 @@ def flush_operations(
     with parallel_backend("threading", n_jobs=parallelism):
         Parallel()(
             delayed(load_from_s3)(
-                stream=stream, message=message, db_sync=stream_to_sync[stream]
+                stream=stream,
+                message=message,
+                db_sync=stream_to_sync[stream],
+                iceberg_enabled=iceberg_enabled,
             )
             for stream, message in fast_sync_queue.items()
         )

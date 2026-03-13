@@ -4,11 +4,12 @@ Fast Sync Loader for target-redshift
 This module handles loading data from S3 into Redshift using the fast sync strategy.
 It extracts data loading logic from DbSync to provide a cleaner separation of concerns.
 """
-
+import base64
 import json
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 import psycopg2.extras
+import pyarrow as pa
 
 from target_redshift.db_sync import safe_column_name
 
@@ -18,23 +19,46 @@ class FastSyncS3Info:
     """Value object representing fast sync S3 information from STATE messages."""
 
     s3_bucket: str
-    s3_path: str
+    s3_paths: List[str]
     s3_region: str
-    files_uploaded: int
     replication_method: str
+    file_format: str = "csv"
     rows_uploaded: int = 0
+    bytes_uploaded: int = 0
+    time_extracted: str = ""
+    pyarrow_schema: Optional[pa.Schema] = None
+    partition_column: Optional[str] = None
 
     @classmethod
     def from_message(cls, message: Dict[str, Any]) -> "FastSyncS3Info":
         """Create FastSyncS3Info from a message dictionary."""
+
+        pyarrow_schema = None
+        if "pyarrow_schema" in message:
+            # Convert base64-encoded serialized PyArrow schema back to PyArrow schema
+            # The schema is stored as base64-encoded serialized bytes in the message
+            schema_data = message["pyarrow_schema"]
+            # Decode base64 string to bytes and deserialize to PyArrow schema
+            schema_bytes = base64.b64decode(schema_data.encode('utf-8'))
+            pyarrow_schema = pa.ipc.read_schema(pa.py_buffer(schema_bytes))
+
         return cls(
             s3_bucket=message["s3_bucket"],
-            s3_path=message["s3_path"],
+            s3_paths=message["s3_paths"],
             s3_region=message["s3_region"],
-            files_uploaded=message["files_uploaded"],
             replication_method=message["replication_method"],
+            file_format=message.get("file_format", "csv"),
             rows_uploaded=message.get("rows_uploaded", 0),
+            bytes_uploaded=message.get("bytes_uploaded", 0),
+            time_extracted=message.get("time_extracted", ""),
+            pyarrow_schema=pyarrow_schema,
+            partition_column=message.get("partition_column"),
         )
+
+    @property
+    def base_s3_path(self) -> str:
+        # Expect first part is always the base path (common prefix for all files).
+        return self.s3_paths[0]
 
 
 class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instance-attributes
@@ -59,10 +83,7 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
 
     @staticmethod
     def _build_s3_copy_path(s3_info: FastSyncS3Info) -> str:
-        s3_copy_path = f"s3://{s3_info.s3_bucket}/{s3_info.s3_path}"
-        if s3_info.files_uploaded > 1 and s3_copy_path.endswith(".csv"):
-            s3_copy_path = s3_copy_path[:-4]
-        return s3_copy_path
+        return f"s3://{s3_info.s3_bucket}/{s3_info.base_s3_path}"
 
     def _build_copy_sql(
         self,
@@ -75,6 +96,9 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
         copy_credentials = self.db_sync.build_copy_credentials()
         copy_options = self.db_sync.build_copy_options(s3_info.s3_region)
 
+        # For multiple files, Redshift COPY can take the common prefix
+        # and it will load all matching files, so we can just use the
+        # base s3 path (first entry in s3_paths) without needing to list all parts here.
         return f"""COPY {table_name} ({column_names})
             FROM '{s3_copy_path}'
             {copy_credentials}
@@ -163,36 +187,21 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
         return inserts, updates, deletions
 
     def _cleanup_s3_files(self, s3_info: FastSyncS3Info) -> None:
-        try:
-            self.s3_client.delete_object(Bucket=s3_info.s3_bucket, Key=s3_info.s3_path)
-            self.logger.info("Deleted s3://%s/%s", s3_info.s3_bucket, s3_info.s3_path)
-
-            if s3_info.files_uploaded > 1:
-                for part_num in range(2, s3_info.files_uploaded + 1):
-                    if s3_info.s3_path.endswith(".csv"):
-                        part_path = s3_info.s3_path[:-4] + f"_part{part_num}.csv"
-                    else:
-                        part_path = f"{s3_info.s3_path}_part{part_num}.csv"
-                    try:
-                        self.s3_client.delete_object(
-                            Bucket=s3_info.s3_bucket, Key=part_path
-                        )
-                        self.logger.info(
-                            "Deleted s3://%s/%s", s3_info.s3_bucket, part_path
-                        )
-                    except Exception as exc:
-                        self.logger.warning(
-                            "Failed to delete S3 file s3://%s/%s: %s",
-                            s3_info.s3_bucket,
-                            part_path,
-                            str(exc),
-                        )
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to clean up S3 files from bucket %s: %s",
-                s3_info.s3_bucket,
-                str(exc),
-            )
+        for part_path in s3_info.s3_paths:
+            try:
+                self.s3_client.delete_object(
+                    Bucket=s3_info.s3_bucket, Key=part_path
+                )
+                self.logger.info(
+                    "Deleted s3://%s/%s", s3_info.s3_bucket, part_path
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "Failed to delete S3 file s3://%s/%s: %s",
+                    s3_info.s3_bucket,
+                    part_path,
+                    str(exc),
+                )
 
     def load_from_s3(  # pylint: disable=too-many-locals
         self,
@@ -219,7 +228,7 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
             "Fast sync: Loading %s rows from s3://%s/%s into '%s'",
             s3_info.rows_uploaded,
             s3_info.s3_bucket,
-            s3_info.s3_path,
+            s3_info.base_s3_path,
             stage_table,
         )
 
