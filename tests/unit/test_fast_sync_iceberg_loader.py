@@ -4,7 +4,6 @@ Unit tests for Fast Sync Iceberg loader in target-redshift
 
 import pyarrow as pa
 from unittest.mock import MagicMock, patch
-
 from target_redshift.fast_sync.loader import FastSyncS3Info
 from target_redshift.fast_sync.iceberg.iceberg_loader import (
     FastSyncIcebergLoader,
@@ -29,7 +28,7 @@ class TestFastSyncIcebergLoader:
             pyarrow_schema=self.source_schema,
         )
 
-    def _create_loader(self, s3_info=None):
+    def _create_loader(self, s3_info=None, boto3_session=None):
         connection_config = {
             "aws_access_key_id": "test_key",
             "aws_secret_access_key": "test_secret",
@@ -42,6 +41,7 @@ class TestFastSyncIcebergLoader:
             stream="test_schema-test_table",
             connection_config=connection_config,
             stream_s3_info=s3_info or self.s3_info,
+            boto3_session=boto3_session,
         )
 
     def test_init_sets_attributes(self):
@@ -132,18 +132,29 @@ class TestFastSyncIcebergLoader:
 
     @patch("target_redshift.fast_sync.iceberg.iceberg_loader.load_catalog")
     def test_iceberg_catalog_passes_glue_properties(self, mock_load_catalog):
-        """Test iceberg_catalog passes Glue type and region to load_catalog"""
+        """Test iceberg_catalog passes Glue type, region, and botocore session to load_catalog"""
         mock_catalog = MagicMock()
         mock_load_catalog.return_value = mock_catalog
 
-        loader = self._create_loader()
+        mock_glue_client = MagicMock()
+        mock_boto3_session = MagicMock()
+        mock_boto3_session.client.return_value = mock_glue_client
+
+        loader = self._create_loader(boto3_session=mock_boto3_session)
         _ = loader.iceberg_catalog
 
+        mock_boto3_session.client.assert_called_once_with(
+            "glue", region_name="us-east-1"
+        )
         mock_load_catalog.assert_called_once()
         assert mock_load_catalog.call_args[0][0] == "glue_catalog"
         call_kw = mock_load_catalog.call_args[1]
         assert call_kw["type"] == "glue"
         assert call_kw["client.region"] == "us-east-1"
+        assert call_kw["client"] is mock_glue_client
+        assert "client.access-key-id" not in call_kw
+        assert "client.secret-access-key" not in call_kw
+        assert "client.session-token" not in call_kw
 
     def test_sync_iceberg_table_calls_add_files(self):
         """Test _sync_iceberg_table calls add_files with s3:// URIs for each file path"""

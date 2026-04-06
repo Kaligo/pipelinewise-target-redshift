@@ -23,6 +23,7 @@ state.json
 *.db
 .DS_Store
 venv
+.venv
 env
 blog_old.md
 node_modules
