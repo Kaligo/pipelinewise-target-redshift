@@ -127,6 +127,7 @@ def load_from_s3(
                 stream=db_sync.stream_schema_message["stream"],
                 connection_config=db_sync.connection_config,
                 stream_s3_info=s3_info,
+                boto3_session=db_sync.aws_session,
             )
             loader.load_from_s3()
         else:
