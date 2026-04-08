@@ -7,7 +7,7 @@ with open("README.md") as f:
 
 setup(
     name="pipelinewise-target-redshift",
-    version="1.6.4",
+    version="1.6.5",
     description="Singer.io target for loading data to Amazon Redshift - PipelineWise compatible",
     long_description=long_description,
     long_description_content_type="text/markdown",
