@@ -242,6 +242,7 @@ class TestFastSyncHandler:
         assert call_kwargs["logger"] is db.logger
         assert call_kwargs["stream"] == db.stream_schema_message["stream"]
         assert call_kwargs["connection_config"] is db.connection_config
+        assert call_kwargs["boto3_session"] is db.aws_session
         s3_info = call_kwargs["stream_s3_info"]
         assert isinstance(s3_info, FastSyncS3Info)
         assert s3_info.s3_bucket == "test-bucket"

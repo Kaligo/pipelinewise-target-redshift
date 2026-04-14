@@ -325,13 +325,21 @@ class DbSync:
                 aws_secret_access_key=aws_secret_access_key,
                 aws_session_token=aws_session_token,
             )
+
+            # Note: frozen credentials are not recommended for long-running processes
+            # as they won't auto-refresh, but for the short-lived process of loading a
+            # single stream it should be fine.
+            # For longer-running processes, it's recommended to use IAM Roles
+            # for Service Accounts (IRSA) (AWS_ROLE_ARN + AWS_WEB_IDENTITY_TOKEN_FILE),
+            # where boto3 is expected to refresh temporary credentials automatically.
+            credentials = aws_session.get_credentials().get_frozen_credentials()
+            self.connection_config["aws_access_key_id"] = credentials.access_key
+            self.connection_config["aws_secret_access_key"] = credentials.secret_key
+            self.connection_config["aws_session_token"] = credentials.token
         else:
             aws_session = boto3.session.Session(profile_name=aws_profile)
 
-        credentials = aws_session.get_credentials().get_frozen_credentials()
-        self.connection_config["aws_access_key_id"] = credentials.access_key
-        self.connection_config["aws_secret_access_key"] = credentials.secret_key
-        self.connection_config["aws_session_token"] = credentials.token
+        self.aws_session = aws_session
 
         self.s3 = aws_session.client("s3")
         self.skip_updates = self.connection_config.get("skip_updates", False)

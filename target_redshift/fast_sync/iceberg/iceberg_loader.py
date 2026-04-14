@@ -1,7 +1,8 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from functools import cached_property
 import logging
 
+import boto3
 import pyarrow as pa
 from pyiceberg.catalog import load_catalog, Catalog
 from pyiceberg.table import Table
@@ -18,6 +19,7 @@ class FastSyncIcebergLoader:
         stream: str,
         connection_config: Dict[str, Any],
         stream_s3_info: FastSyncS3Info,
+        boto3_session: Optional[boto3.session.Session] = None,
     ):
 
         if stream_s3_info.file_format not in ("parquet", "orc", "avro"):
@@ -37,6 +39,7 @@ class FastSyncIcebergLoader:
         self.s3_region = stream_s3_info.s3_region
         self.s3_bucket = stream_s3_info.s3_bucket
         self.s3_keys = stream_s3_info.s3_paths
+        self.boto3_session = boto3_session
 
     @property
     def iceberg_table(self) -> str:
@@ -84,14 +87,23 @@ class FastSyncIcebergLoader:
     def iceberg_catalog(self) -> Catalog:
         """
         Load the iceberg catalog and create a namespace if it doesn't exist
+
+        When a boto3 Session is provided, build a Glue client with Session.client().
+        That is the supported boto3 API: the client uses the session's credential
+        provider for each request, so temporary creds (IRSA, assumed roles, etc.)
+        refresh instead of passing frozen keys from connection_config (used for COPY).
+
+        PyIceberg's GlueCatalog accepts this client directly; see GlueCatalog.__init__
+        (client=...) in apache/iceberg-python.
         """
-        catalog_props = {
+        catalog_props: Dict[str, Any] = {
             "type": "glue",
             "client.region": self.s3_region,
-            "client.access-key-id": self.connection_config.get("aws_access_key_id"),
-            "client.secret-access-key": self.connection_config.get("aws_secret_access_key"),
-            "client.session-token": self.connection_config.get("aws_session_token"),
         }
+        if self.boto3_session is not None:
+            catalog_props["client"] = self.boto3_session.client(
+                "glue", region_name=self.s3_region
+            )
         iceberg_catalog = load_catalog(self.catalog_name, **catalog_props)
         iceberg_catalog.create_namespace_if_not_exists(self.iceberg_namespace)
         return iceberg_catalog
