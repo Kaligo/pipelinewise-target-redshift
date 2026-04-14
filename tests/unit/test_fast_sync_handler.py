@@ -6,8 +6,8 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from target_redshift import db_sync
+from target_redshift.fast_sync.handler import FastSyncS3Info
 import target_redshift.fast_sync.handler as fast_sync_handler
-from target_redshift.fast_sync.loader import FastSyncS3Info
 
 
 class TestFastSyncHandler:
