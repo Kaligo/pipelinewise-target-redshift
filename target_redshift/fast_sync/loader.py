@@ -58,7 +58,8 @@ class FastSyncS3Info:
     @property
     def base_s3_path(self) -> str:
         # Expect first part is always the base path (common prefix for all files).
-        return self.s3_paths[0]
+        if self.s3_paths:
+            return self.s3_paths[0]
 
 
 class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instance-attributes
@@ -220,6 +221,13 @@ class FastSyncLoader:  # pylint: disable=too-few-public-methods,too-many-instanc
         Args:
             s3_info: FastSyncS3Info value object containing S3 information
         """
+        if s3_info.rows_uploaded == 0:
+            self.logger.info(
+                "No rows to load from S3 for stream %s, skipping COPY and merge",
+                self.stream_schema_message["stream"],
+            )
+            return
+
         stream = self.stream_schema_message["stream"]
         stage_table = self.db_sync.table_name(stream, is_stage=True)
         target_table = self.db_sync.table_name(stream, is_stage=False)

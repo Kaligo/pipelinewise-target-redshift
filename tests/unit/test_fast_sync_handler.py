@@ -131,7 +131,9 @@ class TestFastSyncHandler:
 
     def test_validate_and_extract_message_missing_s3_paths(self):
         """Test validation fails when s3_paths is missing"""
-        self._test_validate_missing_field("s3_paths", "missing required fields: s3_paths")
+        self._test_validate_missing_field(
+            "s3_paths", "missing required fields: s3_paths"
+        )
 
     def test_validate_and_extract_message_missing_s3_region(self):
         """Test validation fails when s3_region is missing"""
@@ -168,7 +170,9 @@ class TestFastSyncHandler:
         db = MagicMock()
         message = self._create_valid_message(rows_uploaded=100)
 
-        fast_sync_handler.load_from_s3("test_stream", message, db, iceberg_enabled=False)
+        fast_sync_handler.load_from_s3(
+            "test_stream", message, db, iceberg_enabled=False
+        )
 
         mock_loader_class.assert_called_once_with(db)
         # Verify load_from_s3 was called with FastSyncS3Info dataclass
@@ -223,6 +227,23 @@ class TestFastSyncHandler:
         assert s3_info.s3_region == "us-west-2"
         assert s3_info.rows_uploaded == 0  # Default value when not provided
         assert s3_info.replication_method == "FULL_TABLE"
+
+    @patch("target_redshift.fast_sync.handler.FastSyncLoader")
+    def test_load_from_s3_with_empty_s3_paths_does_not_raise(self, mock_loader_class):
+        """When s3_paths is empty, load_from_s3 should still dispatch without IndexError."""
+        mock_loader = self._create_mock_loader(mock_loader_class)
+
+        db = MagicMock()
+        message = self._create_valid_message(s3_paths=[], rows_uploaded=0)
+
+        fast_sync_handler.load_from_s3(
+            "test_stream", message, db, iceberg_enabled=False
+        )
+
+        assert mock_loader.load_from_s3.call_count == 1
+        s3_info = mock_loader.load_from_s3.call_args[0][0]
+        assert s3_info.s3_paths == []
+        assert s3_info.base_s3_path is None
 
     @patch("target_redshift.fast_sync.handler.FastSyncIcebergLoader")
     def test_load_from_s3_iceberg_enabled_uses_iceberg_loader(self, mock_iceberg_class):
