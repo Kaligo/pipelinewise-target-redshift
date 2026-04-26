@@ -501,6 +501,30 @@ class TestFastSyncLoader:
 
     @patch("target_redshift.db_sync.boto3")
     @patch("target_redshift.db_sync.psycopg2.connect")
+    def test_fast_sync_skips_load_when_rows_uploaded_zero(
+        self, mock_connect, mock_boto3
+    ):
+        """When rows_uploaded is 0, load_from_s3 returns early without COPY, merge, or S3 cleanup."""
+        loader, mock_cursor, mock_s3_client = self._create_loader(
+            mock_connect=mock_connect, mock_boto3=mock_boto3
+        )
+
+        s3_info = self._create_s3_info(
+            s3_bucket="source-bucket",
+            s3_region="us-east-1",
+            rows_uploaded=0,
+        )
+        loader.load_from_s3(s3_info)
+
+        assert mock_cursor.execute.call_count == 0, (
+            "No SQL should be executed when rows_uploaded is 0"
+        )
+        assert mock_s3_client.delete_object.call_count == 0, (
+            "S3 files should not be deleted when rows_uploaded is 0"
+        )
+
+    @patch("target_redshift.db_sync.boto3")
+    @patch("target_redshift.db_sync.psycopg2.connect")
     def test_fast_sync_deletion_detection_no_primary_key_full_table(
         self, mock_connect, mock_boto3
     ):
@@ -532,3 +556,29 @@ class TestFastSyncLoader:
         assert len(deletion_calls) == 0, (
             "Deletion detection should NOT be executed without primary keys"
         )
+
+
+class TestFastSyncS3Info:
+    """Test cases for FastSyncS3Info value object"""
+
+    def test_base_s3_path_returns_first_path(self):
+        """base_s3_path returns the first entry of s3_paths."""
+        s3_info = FastSyncS3Info(
+            s3_bucket="my-bucket",
+            s3_paths=["a/b/data.csv", "a/b/data.csv_part2"],
+            s3_region="us-east-1",
+            replication_method="FULL_TABLE",
+            rows_uploaded=10,
+        )
+        assert s3_info.base_s3_path == "a/b/data.csv"
+
+    def test_base_s3_path_returns_none_when_paths_empty(self):
+        """base_s3_path returns None when s3_paths is empty (no IndexError)."""
+        s3_info = FastSyncS3Info(
+            s3_bucket="my-bucket",
+            s3_paths=[],
+            s3_region="us-east-1",
+            replication_method="FULL_TABLE",
+            rows_uploaded=0,
+        )
+        assert s3_info.base_s3_path is None

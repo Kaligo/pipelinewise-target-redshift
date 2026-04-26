@@ -113,13 +113,20 @@ def load_from_s3(
     """Load data from S3 for a single stream (used for parallel processing)"""
     try:
         s3_info = FastSyncS3Info.from_message(message)
-        LOGGER.info(
-            "Processing %s for stream %s: s3://%s/%s",
-            FAST_SYNC_S3_INFO_KEY,
-            stream,
-            s3_info.s3_bucket,
-            s3_info.base_s3_path,
-        )
+        if s3_info.base_s3_path:
+            LOGGER.info(
+                "Processing %s for stream %s: s3://%s/%s",
+                FAST_SYNC_S3_INFO_KEY,
+                stream,
+                s3_info.s3_bucket,
+                s3_info.base_s3_path,
+            )
+        else:
+            LOGGER.info(
+                "Processing %s for stream %s: no S3 files",
+                FAST_SYNC_S3_INFO_KEY,
+                stream,
+            )
         if iceberg_enabled:
             LOGGER.info("Loading to iceberg for stream %s", stream)
             loader = FastSyncIcebergLoader(

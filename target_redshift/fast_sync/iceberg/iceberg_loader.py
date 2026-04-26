@@ -21,7 +21,6 @@ class FastSyncIcebergLoader:
         stream_s3_info: FastSyncS3Info,
         boto3_session: Optional[boto3.session.Session] = None,
     ):
-
         if stream_s3_info.file_format not in ("parquet", "orc", "avro"):
             raise ValueError(
                 f"Unsupported file format: {stream_s3_info.file_format}. Should be one of: parquet, orc, avro"
@@ -77,11 +76,15 @@ class FastSyncIcebergLoader:
 
                 for column_name in to_delete:
                     update.delete_column(column_name)
-            txt.add_files(
-                # s3_file_path is bucket/key (from source_s3_paths); add_files expects a full s3:// URI, so we prepend the prefix.
-                file_paths=[f"s3://{s3_file_path}" for s3_file_path in s3_file_paths],
-                check_duplicate_files=True,
-            )
+            if s3_file_paths:
+                txt.add_files(
+                    # s3_file_path is bucket/key (from source_s3_paths);
+                    # add_files expects a full s3:// URI, so we prepend the prefix.
+                    file_paths=[
+                        f"s3://{s3_file_path}" for s3_file_path in s3_file_paths
+                    ],
+                    check_duplicate_files=True,
+                )
 
     @cached_property
     def iceberg_catalog(self) -> Catalog:

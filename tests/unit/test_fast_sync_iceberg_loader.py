@@ -16,7 +16,11 @@ class TestFastSyncIcebergLoader:
     def setup_method(self):
         """Set up test fixtures"""
         self.source_schema = pa.schema(
-            [("id", pa.int64()), ("name", pa.string()), ("_sdc_batched_at", pa.timestamp("us"))]
+            [
+                ("id", pa.int64()),
+                ("name", pa.string()),
+                ("_sdc_batched_at", pa.timestamp("us")),
+            ]
         )
         self.s3_info = FastSyncS3Info(
             s3_bucket="my-bucket",
@@ -55,7 +59,9 @@ class TestFastSyncIcebergLoader:
         assert loader.partition_column == "_sdc_batched_at"
         assert loader.s3_region == "us-east-1"
         assert loader.s3_bucket == "my-bucket"
-        assert loader.source_s3_paths == ["my-bucket/fast_sync/export/path/data.parquet"]
+        assert loader.source_s3_paths == [
+            "my-bucket/fast_sync/export/path/data.parquet"
+        ]
         assert (
             loader.iceberg_table_location
             == "s3://my-bucket/iceberg/test_schema-test_table"
@@ -173,6 +179,24 @@ class TestFastSyncIcebergLoader:
             check_duplicate_files=True,
         )
 
+    def test_sync_iceberg_table_skips_add_files_when_no_paths(self):
+        """When s3_file_paths is empty, schema sync still runs but add_files is not called."""
+        mock_table = MagicMock()
+        mock_txt = MagicMock()
+        mock_update = MagicMock()
+        mock_txt.update_schema.return_value.__enter__.return_value = mock_update
+        mock_txt.update_schema.return_value.__exit__.return_value = None
+        mock_table.transaction.return_value.__enter__.return_value = mock_txt
+        mock_table.transaction.return_value.__exit__.return_value = None
+        mock_table.schema.return_value.as_arrow.return_value.names = ["id"]
+
+        loader = self._create_loader()
+        loader._sync_iceberg_table(mock_table, [])
+
+        mock_txt.update_schema.assert_called_once()
+        mock_update.union_by_name.assert_called_once_with(self.source_schema)
+        mock_txt.add_files.assert_not_called()
+
     def test_sync_iceberg_table_schema_union_and_delete(self):
         """Test _sync_iceberg_table calls update_schema with union_by_name and deletes columns absent from source"""
         # Table has a, b, d; source has a, b, c -> union adds c; to_delete = table - source = {d}
@@ -199,7 +223,9 @@ class TestFastSyncIcebergLoader:
         mock_table.schema.return_value.as_arrow.return_value.names = ["a", "b", "d"]
 
         loader = self._create_loader(s3_info=s3_info)
-        loader._sync_iceberg_table(mock_table, ["my-bucket/fast_sync/export/path/data.parquet"])
+        loader._sync_iceberg_table(
+            mock_table, ["my-bucket/fast_sync/export/path/data.parquet"]
+        )
 
         mock_table.transaction.assert_called_once()
         mock_txt.update_schema.assert_called_once()
