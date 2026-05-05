@@ -62,7 +62,8 @@ def column_type(schema_property, with_length=True):
     if schema_property.get("maxLength", 0) > varchar_length:
         varchar_length = LONG_VARCHAR_LENGTH
     if "object" in property_type or "array" in property_type:
-        column_type = "SUPER"
+        column_type = "character varying"
+        varchar_length = LONG_VARCHAR_LENGTH
 
     # Every date-time JSON value is currently mapped to TIMESTAMP WITHOUT TIME ZONE
     #
