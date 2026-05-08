@@ -95,36 +95,17 @@ def emit_state(state):
         sys.stdout.flush()
 
 
-def flush_fast_sync_queue(
-    fast_sync_queue, stream_to_sync, config, flushed_state=None
-):  # pylint: disable=too-many-arguments
-    """Flush queued fast sync operations with parallelism from config and clear the queue.
-
-    Optionally cleans up fast_sync_s3_info from flushed_state bookmarks for processed streams.
-
-    Args:
-        fast_sync_queue: Dictionary of queued fast sync operations
-        stream_to_sync: Dictionary of stream sync instances
-        config: Configuration dictionary
-        flushed_state: Optional state dictionary to clean up fast_sync_s3_info from
-    """
-    if not fast_sync_queue:
-        return
-
-    parallelism = config.get("parallelism", DEFAULT_PARALLELISM)
-    max_parallelism = config.get("max_parallelism", DEFAULT_MAX_PARALLELISM)
-    iceberg_enabled = config.get("iceberg_enabled", False)
-    fast_sync_handler.flush_operations(
-        fast_sync_queue, stream_to_sync, parallelism, max_parallelism, iceberg_enabled
+def process_fast_sync_operations(
+    operations, stream_to_sync, config, flushed_state=None
+):
+    """Run fast_sync S3 loads and strip fast_sync_s3_info from flushed_state."""
+    fast_sync_handler.process_operations(
+        operations, stream_to_sync, config.get("iceberg_enabled", False)
     )
-
-    # Clean up fast_sync_s3_info from flushed_state if provided
     if flushed_state:
         fast_sync_handler.cleanup_fast_sync_s3_info_from_state(
-            flushed_state, fast_sync_queue.keys()
+            flushed_state, operations.keys()
         )
-
-    fast_sync_queue.clear()
 
 
 def get_schema_names_from_config(config):
@@ -166,9 +147,6 @@ def persist_lines(config, lines, table_cache=None) -> None:
     row_count = {}
     stream_to_sync = {}
     total_row_count = {}
-    fast_sync_queue = (
-        {}
-    )  # Queue for fast_sync_s3_info operations (extracted from STATE messages) to process in parallel
     batch_size_rows = config.get("batch_size_rows", DEFAULT_BATCH_SIZE_ROWS)
 
     # Loop over lines from stdin
@@ -328,18 +306,31 @@ def persist_lines(config, lines, table_cache=None) -> None:
             LOGGER.debug("ACTIVATE_VERSION message")
 
         elif t == "STATE":
-            LOGGER.debug("Setting state to {}".format(o["value"]))
             state = o["value"]
-
-            # Extract and queue fast sync operations from state bookmarks
-            operations = fast_sync_handler.extract_operations_from_state(
-                state, schemas, stream_to_sync
-            )
-            fast_sync_queue.update(operations)
+            LOGGER.debug("Setting state to {}".format(state))
 
             # Initially set flushed state
             if not flushed_state:
                 flushed_state = copy.deepcopy(state)
+
+            # Process fast_sync ops on arrival, not at end-of-input: the tap
+            # emits one STATE per windowed initial-load window, all keyed by
+            # the same stream_id, so a stream_id-keyed queue would overwrite
+            # all but the last window's fast_sync_s3_info.
+            operations = fast_sync_handler.extract_operations_from_state(
+                state, schemas, stream_to_sync
+            )
+            if operations:
+                if "bookmarks" not in flushed_state:
+                    flushed_state["bookmarks"] = {}
+                for stream_id in operations:
+                    flushed_state["bookmarks"][stream_id] = state["bookmarks"][
+                        stream_id
+                    ]
+                process_fast_sync_operations(
+                    operations, stream_to_sync, config, flushed_state
+                )
+                emit_state(copy.deepcopy(flushed_state))
 
         else:
             raise Exception(
@@ -353,9 +344,6 @@ def persist_lines(config, lines, table_cache=None) -> None:
         flushed_state = flush_streams(
             records_to_load, row_count, stream_to_sync, config, state, flushed_state
         )
-
-    # Process any remaining fast sync operations and clean up fast_sync_s3_info from flushed_state
-    flush_fast_sync_queue(fast_sync_queue, stream_to_sync, config, flushed_state)
 
     # emit latest state
     emit_state(copy.deepcopy(flushed_state))

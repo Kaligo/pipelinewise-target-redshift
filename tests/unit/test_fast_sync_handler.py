@@ -271,43 +271,25 @@ class TestFastSyncHandler:
         assert s3_info.rows_uploaded == 50
         mock_iceberg_loader.load_from_s3.assert_called_once_with()
 
-    def test_flush_operations_empty_queue(self):
-        """Test flush_operations with empty queue"""
-        # Should return early without any processing
-        fast_sync_handler.flush_operations({}, {}, 4, 16, False)
+    def test_process_operations_empty(self):
+        """Empty operations is a no-op"""
+        fast_sync_handler.process_operations({}, {}, False)
 
-    @patch("target_redshift.fast_sync.handler.Parallel")
-    def test_flush_operations_with_parallelism(self, mock_parallel_class):
-        """Test flush_operations with explicit parallelism"""
-        mock_parallel_instance = MagicMock()
-        mock_parallel_class.return_value = mock_parallel_instance
+    @patch("target_redshift.fast_sync.handler.load_from_s3")
+    def test_process_operations_calls_load_from_s3(self, mock_load_from_s3):
+        """Each operation is dispatched to load_from_s3."""
+        operations, stream_to_sync = self._create_fast_sync_queue_and_streams(1)
 
-        fast_sync_queue, stream_to_sync = self._create_fast_sync_queue_and_streams(2)
-
-        fast_sync_handler.flush_operations(
-            fast_sync_queue, stream_to_sync, 2, 16, iceberg_enabled=False
+        fast_sync_handler.process_operations(
+            operations, stream_to_sync, iceberg_enabled=False
         )
 
-        # Verify Parallel was instantiated and called
-        mock_parallel_class.assert_called_once()
-        mock_parallel_instance.assert_called_once()
-
-    @patch("target_redshift.fast_sync.handler.parallel_backend")
-    @patch("target_redshift.fast_sync.handler.Parallel")
-    def test_flush_operations_auto_parallelism(self, mock_parallel, mock_backend):
-        """Test flush_operations with auto parallelism (parallelism=0)"""
-        fast_sync_queue, stream_to_sync = self._create_fast_sync_queue_and_streams(3)
-
-        # parallelism=0 should use min(n_streams, max_parallelism)
-        fast_sync_handler.flush_operations(
-            fast_sync_queue, stream_to_sync, 0, 2, iceberg_enabled=False
+        mock_load_from_s3.assert_called_once_with(
+            stream="stream1",
+            message=operations["stream1"],
+            db_sync=stream_to_sync["stream1"],
+            iceberg_enabled=False,
         )
-
-        # Verify parallel processing was invoked
-        mock_parallel.assert_called_once()
-        mock_backend.assert_called_once()
-        # Verify parallel_backend was called with threading backend
-        assert "threading" in str(mock_backend.call_args[0][0])
 
     def test_extract_operations_from_state_single_operation(self):
         """Test extract_operations_from_state with single fast_sync_s3_info"""

@@ -275,59 +275,37 @@ class TestTargetRedshift:
                 state, self.schemas, stream_to_sync
             )
 
-    def test_flush_fast_sync_queue_empty_queue(self):
-        """Test flush_fast_sync_queue with empty queue"""
-        fast_sync_queue = {}
-        stream_to_sync = {}
-        config = {}
+    def test_process_fast_sync_operations_empty(self):
+        """Empty operations is a no-op"""
+        target_redshift.process_fast_sync_operations({}, {}, {})
 
-        # Should not raise any exception
-        target_redshift.flush_fast_sync_queue(fast_sync_queue, stream_to_sync, config)
-
-        assert fast_sync_queue == {}
-
-    @patch("target_redshift.fast_sync.handler.flush_operations")
-    def test_flush_fast_sync_queue_with_operations(self, mock_flush_operations):
-        """Test flush_fast_sync_queue with queued operations"""
-        fast_sync_queue = {
-            "test_schema-test_table": {
-                "s3_bucket": "test-bucket",
-                "s3_paths": ["test/path/data.csv"],
-                "s3_region": "us-east-1",
-                "replication_method": "FULL_TABLE",
-                "rows_uploaded": 100,
-            }
-        }
+    @patch("target_redshift.fast_sync.handler.process_operations")
+    def test_process_fast_sync_operations_dispatches(self, mock_process_operations):
+        """Operations are forwarded to handler.process_operations"""
+        operations = {"test_schema-test_table": self._create_fast_sync_s3_info()}
         stream_to_sync = self._create_stream_to_sync()
-        config = {"parallelism": 2, "max_parallelism": 16}
 
-        target_redshift.flush_fast_sync_queue(fast_sync_queue, stream_to_sync, config)
+        target_redshift.process_fast_sync_operations(operations, stream_to_sync, {})
 
-        mock_flush_operations.assert_called_once_with(
-            fast_sync_queue, stream_to_sync, 2, 16, False
+        mock_process_operations.assert_called_once_with(
+            operations, stream_to_sync, False
         )
-        assert fast_sync_queue == {}
 
-    @patch("target_redshift.fast_sync.handler.flush_operations")
-    def test_flush_fast_sync_queue_default_parallelism(self, mock_flush_operations):
-        """Test flush_fast_sync_queue with default parallelism values"""
-        fast_sync_queue = {
-            "test_schema-test_table": {
-                "s3_bucket": "test-bucket",
-                "s3_paths": ["test/path/data.csv"],
-                "s3_region": "us-east-1",
-                "replication_method": "FULL_TABLE",
-            }
-        }
+    @patch("target_redshift.fast_sync.handler.process_operations")
+    def test_process_fast_sync_operations_forwards_iceberg_enabled(
+        self, mock_process_operations
+    ):
+        """iceberg_enabled from config is forwarded to handler.process_operations"""
+        operations = {"test_schema-test_table": self._create_fast_sync_s3_info()}
         stream_to_sync = self._create_stream_to_sync()
-        config = {}
 
-        target_redshift.flush_fast_sync_queue(fast_sync_queue, stream_to_sync, config)
-
-        mock_flush_operations.assert_called_once_with(
-            fast_sync_queue, stream_to_sync, 0, 16, False
+        target_redshift.process_fast_sync_operations(
+            operations, stream_to_sync, {"iceberg_enabled": True}
         )
-        assert fast_sync_queue == {}
+
+        mock_process_operations.assert_called_once_with(
+            operations, stream_to_sync, True
+        )
 
     def test_cleanup_fast_sync_s3_info_from_state(self):
         """Test cleanup_fast_sync_s3_info_from_state removes fast_sync_s3_info from bookmarks"""
@@ -378,11 +356,11 @@ class TestTargetRedshift:
         # Should not raise any exception - function handles missing bookmarks gracefully
         fast_sync_handler.cleanup_fast_sync_s3_info_from_state(state, processed_streams)
 
-    @patch("target_redshift.fast_sync.handler.flush_operations")
+    @patch("target_redshift.fast_sync.handler.process_operations")
     @patch("target_redshift.flush_streams")
     @patch("target_redshift.DbSync")
     def test_persist_lines_with_state_containing_fast_sync_info(
-        self, db_sync_mock, flush_streams_mock, mock_flush_operations
+        self, db_sync_mock, flush_streams_mock, mock_process_operations
     ):
         """Test persist_lines processes STATE messages with fast_sync_s3_info"""
         self.config["batch_size_rows"] = 100000
@@ -440,6 +418,73 @@ class TestTargetRedshift:
 
         target_redshift.persist_lines(self.config, lines)
 
-        # Verify fast_sync operations were flushed at the end
-        mock_flush_operations.assert_called_once()
+        # Verify fast_sync operations were processed
+        mock_process_operations.assert_called_once()
         flush_streams_mock.assert_called_once()
+
+    @patch("target_redshift.fast_sync.handler.process_operations")
+    @patch("target_redshift.DbSync")
+    def test_persist_lines_processes_every_fast_sync_state(
+        self, db_sync_mock, mock_process_operations
+    ):
+        """Regression: each STATE with fast_sync_s3_info must be processed
+        on arrival, not just the last one for a given stream.
+
+        The tap's in-loop windowed initial load emits one STATE per window,
+        each carrying a different ``fast_sync_s3_info`` for the SAME
+        stream_id. Earlier this target queued operations in a stream_id-keyed
+        dict and flushed only once at end-of-input - every STATE after the
+        first silently overwrote the prior queued entry, so all but the last
+        window's S3 file was dropped.
+        """
+        instance = db_sync_mock.return_value
+        instance.create_schema_if_not_exists.return_value = None
+        instance.sync_table.return_value = None
+
+        s3_paths_emitted = [
+            "test/path/window_1.csv",
+            "test/path/window_2.csv",
+            "test/path/window_3.csv",
+        ]
+        lines = [
+            json.dumps(
+                {
+                    "type": "SCHEMA",
+                    "stream": "test_schema-test_table",
+                    "schema": {"properties": {"id": {"type": ["null", "integer"]}}},
+                    "key_properties": ["id"],
+                }
+            )
+            + "\n",
+        ] + [
+            json.dumps(
+                {
+                    "type": "STATE",
+                    "value": {
+                        "bookmarks": {
+                            "test_schema-test_table": {
+                                "fast_sync_s3_info": self._create_fast_sync_s3_info(
+                                    s3_paths=[path]
+                                )
+                            }
+                        }
+                    },
+                }
+            )
+            + "\n"
+            for path in s3_paths_emitted
+        ]
+
+        target_redshift.persist_lines(self.config, lines)
+
+        assert mock_process_operations.call_count == len(s3_paths_emitted)
+
+        # extract_operations_from_state returns a fresh dict per STATE, so
+        # call_args_list holds three distinct dicts - safe to inspect.
+        flushed_paths = [
+            path
+            for call in mock_process_operations.call_args_list
+            for op in call.args[0].values()
+            for path in op["s3_paths"]
+        ]
+        assert sorted(flushed_paths) == sorted(s3_paths_emitted)
