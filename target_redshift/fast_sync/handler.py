@@ -1,11 +1,10 @@
 """
 Fast Sync Handler for target-redshift
 
-This module handles fast_sync_s3_info embedded in STATE messages and processes them in parallel.
+This module handles fast_sync_s3_info embedded in STATE messages.
 """
 
 from typing import Dict, Any, Iterable
-from joblib import Parallel, delayed, parallel_backend
 from singer import get_logger
 from target_redshift.fast_sync.loader import FastSyncLoader, FastSyncS3Info
 from target_redshift.fast_sync.iceberg.iceberg_loader import FastSyncIcebergLoader
@@ -150,35 +149,23 @@ def load_from_s3(
         raise
 
 
-def flush_operations(
-    fast_sync_queue: Dict[str, Dict[str, Any]],
+def process_operations(
+    operations: Dict[str, Dict[str, Any]],
     stream_to_sync: Dict[str, Any],
-    parallelism: int,
-    max_parallelism: int,
     iceberg_enabled: bool,
 ) -> None:
-    """Process queued fast_sync_s3_info operations in parallel"""
-    if not fast_sync_queue:
-        return
+    """Process fast_sync_s3_info operations sequentially.
 
-    # Parallelism 0 means auto parallelism:
-    #
-    # Auto parallelism trying to flush streams efficiently with auto defined number
-    # of threads where the number of threads is the number of streams that need to
-    # be loaded but it's not greater than the value of max_parallelism
-    if parallelism == 0:
-        n_streams = len(fast_sync_queue)
-        parallelism = min(n_streams, max_parallelism)
-
-    with parallel_backend("threading", n_jobs=parallelism):
-        Parallel()(
-            delayed(load_from_s3)(
-                stream=stream,
-                message=message,
-                db_sync=stream_to_sync[stream],
-                iceberg_enabled=iceberg_enabled,
-            )
-            for stream, message in fast_sync_queue.items()
+    The target processes one fast_sync operation per STATE message (the tap
+    emits one STATE per windowed initial-load window), so ``operations``
+    holds at most one entry; no parallelism is needed.
+    """
+    for stream, message in operations.items():
+        load_from_s3(
+            stream=stream,
+            message=message,
+            db_sync=stream_to_sync[stream],
+            iceberg_enabled=iceberg_enabled,
         )
 
 
